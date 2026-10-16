@@ -487,3 +487,253 @@ def test_contributing_and_docker_evidence_integration(client):
         assert any("CONTRIBUTING.md" in tip for tip in data["contribution_tips"])
 
 
+# ── 7. Root Endpoint and AI Test Endpoint Tests ──────────────────────────────
+
+def test_root_endpoint(client):
+    """GET / must return 200 with RepoReady status and endpoints."""
+    response = client.get("/")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["app"] == "RepoReady"
+    assert data["status"] == "running"
+    assert "endpoints" in data
+    assert "analyze_repo" in data["endpoints"]
+
+
+@pytest.mark.anyio
+async def test_ai_test_endpoint_mocked_available(client):
+    """POST /api/ai-test must return structured AI response targeting qwen3:4b."""
+    mock_result = {
+        "status": "ok",
+        "target_model": "qwen3:4b",
+        "model_used": "qwen3:4b",
+        "available": True,
+        "response": "Open source contributors collaborate globally to improve software.",
+        "error": None,
+    }
+    with patch("main.test_ai_inference", new=AsyncMock(return_value=mock_result)):
+        response = client.post("/api/ai-test", json={"prompt": "What is open source?"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["target_model"] == "qwen3:4b"
+        assert data["model_used"] == "qwen3:4b"
+        assert data["available"] is True
+        assert "collaborate" in data["response"]
+
+
+@pytest.mark.anyio
+async def test_ai_test_endpoint_unavailable(client):
+    """POST /api/ai-test must return graceful unavailable status when Ollama is offline."""
+    mock_result = {
+        "status": "unavailable",
+        "target_model": "qwen3:4b",
+        "model_used": None,
+        "available": False,
+        "response": None,
+        "error": "Ollama service is not reachable on localhost:11434",
+    }
+    with patch("main.test_ai_inference", new=AsyncMock(return_value=mock_result)):
+        response = client.post("/api/ai-test", json={})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "unavailable"
+        assert data["available"] is False
+        assert "not reachable" in data["error"]
+
+
+# ── 8. Endpoint Aliases: POST /api/analyze-repo and POST /api/analyze ─────────
+
+@pytest.mark.anyio
+def test_analyze_repo_endpoint_and_param_aliases(client):
+    """POST /api/analyze-repo must work with repository_url, repo_url, or url."""
+    mock_meta = RepoMeta(
+        owner="aliasowner",
+        name="aliasrepo",
+        full_name="aliasowner/aliasrepo",
+        html_url="https://github.com/aliasowner/aliasrepo",
+        stars=10,
+        forks=2,
+        open_issues=0,
+        default_branch="main",
+        language="Python",
+        created_at="2024-01-01T00:00:00Z",
+        updated_at="2024-01-02T00:00:00Z",
+        pushed_at="2024-01-03T00:00:00Z",
+        size_kb=50,
+        is_empty=False,
+    )
+    mock_data = {
+        "meta": mock_meta,
+        "languages": LanguageBreakdown(languages={"Python": 1000}, percentages={"Python": 100.0}),
+        "beginner_issues": [],
+        "contributors": [],
+        "file_tree": [FileTreeEntry(path="main.py", type="blob", size=100)],
+        "readme_html": None,
+        "readme_raw": None,
+        "contributing_raw": None,
+        "contributing_path": None,
+        "rate_limit_remaining": 4900,
+        "config_files": {},
+    }
+
+    with patch("main.fetch_all", new=AsyncMock(return_value=mock_data)):
+        # 1. Test /api/analyze-repo with repository_url
+        res1 = client.post("/api/analyze-repo", json={"repository_url": "https://github.com/aliasowner/aliasrepo"})
+        assert res1.status_code == 200
+        assert res1.json()["repository"]["full_name"] == "aliasowner/aliasrepo"
+
+        # 2. Test /api/analyze-repo with repo_url alias
+        res2 = client.post("/api/analyze-repo", json={"repo_url": "https://github.com/aliasowner/aliasrepo"})
+        assert res2.status_code == 200
+
+        # 3. Test older /api/analyze route
+        res3 = client.post("/api/analyze", json={"repository_url": "https://github.com/aliasowner/aliasrepo"})
+        assert res3.status_code == 200
+
+
+# ── 9. URL Security Tests (Credentials, Custom Ports, Localhost) ────────────
+
+def test_url_rejects_credentials():
+    """URLs containing credentials (user:pass@) must be rejected with HTTP 400."""
+    with pytest.raises(Exception) as exc_info:
+        validate_and_parse_github_url("https://user:secret123@github.com/owner/repo")
+    assert "credentials" in str(exc_info.value.detail).lower()
+
+
+def test_url_rejects_custom_ports():
+    """URLs with non-standard ports must be rejected."""
+    with pytest.raises(Exception) as exc_info:
+        validate_and_parse_github_url("https://github.com:8443/owner/repo")
+    assert "custom port" in str(exc_info.value.detail).lower()
+
+
+def test_url_rejects_localhost_and_private_ips():
+    """Localhost and private IP addresses must be rejected."""
+    for bad_url in (
+        "https://localhost/owner/repo",
+        "https://127.0.0.1/owner/repo",
+        "https://192.168.1.10/owner/repo",
+        "https://10.0.0.1/owner/repo",
+    ):
+        with pytest.raises(Exception) as exc_info:
+            validate_and_parse_github_url(bad_url)
+        assert "invalid repository host" in str(exc_info.value.detail).lower()
+
+
+# ── 10. Issue Filtering: Strictly Exclude Pull Requests ──────────────────────
+
+@pytest.mark.anyio
+async def test_fetch_issues_strictly_excludes_pull_requests():
+    """fetch_issues must exclude items containing the pull_request field."""
+    import httpx
+    from github_client import fetch_issues
+
+    mock_github_items = [
+        {
+            "number": 101,
+            "title": "Real Bug Report Issue",
+            "html_url": "https://github.com/org/repo/issues/101",
+            "labels": [{"name": "good first issue"}],
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-02T00:00:00Z",
+            "comments": 3,
+            "body": "This is a real issue description.",
+            # Note: "pull_request" is absent
+        },
+        {
+            "number": 102,
+            "title": "Pull Request pretending to be an issue",
+            "html_url": "https://github.com/org/repo/pull/102",
+            "labels": [{"name": "good first issue"}],
+            "created_at": "2024-01-01T00:00:00Z",
+            "pull_request": {"url": "https://api.github.com/repos/org/repo/pulls/102"},
+        },
+        {
+            "number": 103,
+            "title": "Another Real Open Issue",
+            "html_url": "https://github.com/org/repo/issues/103",
+            "labels": [{"name": "help wanted"}],
+            "created_at": "2024-01-03T00:00:00Z",
+            "updated_at": "2024-01-04T00:00:00Z",
+            "comments": 1,
+            "body": "Fix typo in documentation.",
+            # Note: "pull_request" is absent
+        },
+    ]
+
+    mock_resp = httpx.Response(
+        200,
+        json=mock_github_items,
+        request=httpx.Request("GET", "https://api.github.com/repos/org/repo/issues"),
+    )
+
+    with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_resp)):
+        issues = await fetch_issues("org", "repo", limit=10)
+
+        # PR #102 MUST be excluded!
+        issue_numbers = [i.number for i in issues]
+        assert 101 in issue_numbers
+        assert 103 in issue_numbers
+        assert 102 not in issue_numbers
+
+        # Verify Issue field population
+        first = next(i for i in issues if i.number == 101)
+        assert first.title == "Real Bug Report Issue"
+        assert first.url == "https://github.com/org/repo/issues/101"
+        assert first.updated_at == "2024-01-02T00:00:00Z"
+        assert first.body == "This is a real issue description."
+
+
+# ── 11. Genuinely Empty Repository Detection vs API Errors ───────────────────
+
+@pytest.mark.anyio
+def test_genuinely_empty_repo_detection(client):
+    """Empty repo (size=0, 0 files) returns 200 with is_empty=True and warning, NOT 404/429."""
+    empty_meta = RepoMeta(
+        owner="emptyuser",
+        name="freshrepo",
+        full_name="emptyuser/freshrepo",
+        html_url="https://github.com/emptyuser/freshrepo",
+        stars=0,
+        forks=0,
+        open_issues=0,
+        default_branch="main",
+        language=None,
+        created_at="2024-01-01T00:00:00Z",
+        updated_at="2024-01-01T00:00:00Z",
+        pushed_at=None,
+        is_empty=True,
+        size_kb=0,
+    )
+    empty_data = {
+        "meta": empty_meta,
+        "languages": LanguageBreakdown(languages={}, percentages={}),
+        "beginner_issues": [],
+        "contributors": [],
+        "file_tree": [],
+        "readme_html": None,
+        "readme_raw": None,
+        "contributing_raw": None,
+        "contributing_path": None,
+        "rate_limit_remaining": 4999,
+        "config_files": {},
+    }
+
+    with patch("main.fetch_all", new=AsyncMock(return_value=empty_data)):
+        response = client.post("/api/analyze-repo", json={"repository_url": "https://github.com/emptyuser/freshrepo"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["repository"]["is_empty"] is True
+        assert data["has_readme"] is False
+        assert data["has_contributing"] is False
+        assert any("empty" in w.lower() for w in data["warnings"])
+
+
+def test_auth_failure_401_handling(client):
+    """GitHub 401 Bad Credentials must return 401 with clear message."""
+    from fastapi import HTTPException
+    with patch("main.fetch_all", side_effect=HTTPException(status_code=401, detail="GitHub authentication failed (401 Bad Credentials). Please verify GITHUB_TOKEN in .env.")):
+        response = client.post("/api/analyze", json={"repository_url": "https://github.com/fastapi/fastapi"})
+        assert response.status_code == 401
+        assert "bad credentials" in response.json()["detail"].lower()
