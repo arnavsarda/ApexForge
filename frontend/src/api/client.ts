@@ -148,8 +148,10 @@ export interface AiTestResponse {
   error?: string | null;
 }
 
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+
 export async function testAi(prompt?: string, model?: string): Promise<AiTestResponse> {
-  const res = await fetch('/api/ai-test', {
+  const res = await fetch(`${API_BASE}/api/ai-test`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt, model }),
@@ -165,7 +167,7 @@ export interface ApiError {
  * Call POST /api/analyze to analyze a public GitHub repository.
  */
 export async function analyzeRepository(repositoryUrl: string): Promise<AnalysisResponse> {
-  const res = await fetch('/api/analyze', {
+  const res = await fetch(`${API_BASE}/api/analyze`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ repository_url: repositoryUrl }),
@@ -181,7 +183,7 @@ export async function analyzeRepository(repositoryUrl: string): Promise<Analysis
  * Legacy GET /api/onboard/{owner}/{repo} endpoint.
  */
 export async function fetchOnboard(owner: string, repo: string): Promise<OnboardResponse> {
-  const res = await fetch(`/api/onboard/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
+  const res = await fetch(`${API_BASE}/api/onboard/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
   if (!res.ok) {
     const err: ApiError = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
     throw new Error(err.detail);
@@ -191,7 +193,7 @@ export async function fetchOnboard(owner: string, repo: string): Promise<Onboard
 
 export async function fetchHealth(): Promise<HealthResponse> {
   try {
-    const res = await fetch('/api/health');
+    const res = await fetch(`${API_BASE}/api/health`);
     if (res.ok) {
       const data = await res.json();
       if (data && typeof data === 'object' && 'status' in data) {
@@ -202,7 +204,7 @@ export async function fetchHealth(): Promise<HealthResponse> {
     // fallback below
   }
 
-  const fallback = await fetch('/health');
+  const fallback = await fetch(`${API_BASE}/health`);
   if (!fallback.ok) throw new Error('Backend unreachable');
   return fallback.json();
 }

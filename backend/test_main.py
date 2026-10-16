@@ -29,7 +29,6 @@ if BACKEND_DIR not in sys.path:
 
 from main import app
 from config import (
-    load_project_env,
     get_github_token,
     is_token_configured,
     get_token_diagnostics,
@@ -37,7 +36,7 @@ from config import (
 )
 from validator import validate_and_parse_github_url
 from models import RepoMeta, LanguageBreakdown, Issue, Contributor, FileTreeEntry
-from summarizer import generate_onboarding_guide, _detect_tech_stack, _infer_setup_steps
+from summarizer import generate_onboarding_guide
 from ollama_client import check_ollama_health, generate_ai_guide
 
 
@@ -271,7 +270,29 @@ def test_cors_headers(client):
         },
     )
     assert response.status_code == 200
-    assert "access-control-allow-origin" in response.headers
+    assert response.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+
+def test_cors_rejects_unauthorized_origins(client):
+    """CORS should not allow arbitrary external origins."""
+    response = client.options(
+        "/api/analyze",
+        headers={
+            "Origin": "http://malicious-external-site.com",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert response.headers.get("access-control-allow-origin") is None
+
+
+def test_analyze_rejects_empty_repository_url(client):
+    """POST /api/analyze must reject empty repository URL with 400."""
+    response = client.post(
+        "/api/analyze",
+        json={"repository_url": "   "},
+    )
+    assert response.status_code == 400
+    assert "empty" in response.json()["detail"].lower()
 
 
 # ── 6. Stable Schema & Full Analysis Tests ──────────────────────────────────

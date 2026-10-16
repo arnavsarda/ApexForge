@@ -57,7 +57,9 @@ export default function App() {
     <div className="app-container">
       {/* Hero */}
       <header className="hero">
-        <h1 className="hero-title">RepoReady</h1>
+        <h1 className="hero-title" style={{ cursor: 'pointer' }} onClick={() => setState({ kind: 'idle' })}>
+          RepoReady
+        </h1>
         <p className="hero-subtitle">
           Instantly generate an evidence-based onboarding guide for any public GitHub repository.
           Discover key architecture files, setup commands, beginner issues, and contribution workflows.
@@ -67,6 +69,115 @@ export default function App() {
       {/* Search */}
       <SearchBar onSearch={handleSearch} loading={state.kind === 'loading'} />
 
+      {/* Informative Empty State before analysis */}
+      {state.kind === 'idle' && (
+        <div className="empty-state-showcase fade-in">
+          {/* Quick Start Open-Source Suggestions */}
+          <div style={{ marginBottom: 'var(--space-8)' }}>
+            <h2 style={{ fontSize: 'var(--text-base)', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 'var(--space-4)', textAlign: 'center' }}>
+              Explore Curated Open-Source Repositories
+            </h2>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+                gap: 'var(--space-4)',
+              }}
+            >
+              {[
+                { owner: 'fastapi', repo: 'fastapi', lang: 'Python', desc: 'Modern, fast web framework for building APIs with Python 3.8+.' },
+                { owner: 'facebook', repo: 'react', lang: 'JavaScript', desc: 'The library for web and native user interfaces.' },
+                { owner: 'pallets', repo: 'flask', lang: 'Python', desc: 'The Python micro framework for building web applications.' },
+                { owner: 'expressjs', repo: 'express', lang: 'JavaScript', desc: 'Fast, unopinionated, minimalist web framework for Node.js.' },
+              ].map((item) => (
+                <div
+                  key={`${item.owner}/${item.repo}`}
+                  className="card"
+                  style={{
+                    cursor: 'pointer',
+                    padding: 'var(--space-5)',
+                    border: '1px solid var(--border-subtle)',
+                    transition: 'all 200ms ease',
+                  }}
+                  onClick={() => handleSearch(item.owner, item.repo)}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-2)' }}>
+                    <span style={{ fontWeight: 700, color: 'var(--accent-blue)', fontSize: 'var(--text-sm)' }}>
+                      {item.owner}/{item.repo}
+                    </span>
+                    <span className="tag" style={{ fontSize: '10px' }}>{item.lang}</span>
+                  </div>
+                  <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.5 }}>
+                    {item.desc}
+                  </p>
+                  <div style={{ marginTop: 'var(--space-3)', fontSize: 'var(--text-xs)', color: 'var(--accent-cyan)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <span>Generate Guide</span>
+                    <span>&rarr;</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Feature Highlights Grid */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+              gap: 'var(--space-6)',
+            }}
+          >
+            <div className="card">
+              <div style={{ color: 'var(--accent-purple)', marginBottom: 'var(--space-2)' }}>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M12 2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2 2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"/>
+                  <rect x="4" y="8" width="16" height="12" rx="2"/>
+                  <circle cx="9" cy="14" r="1"/>
+                  <circle cx="15" cy="14" r="1"/>
+                </svg>
+              </div>
+              <h3 style={{ fontSize: 'var(--text-sm)', fontWeight: 700, marginBottom: 'var(--space-1)' }}>
+                Local Qwen3 AI Guidance
+              </h3>
+              <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', lineHeight: 1.6, margin: 0 }}>
+                Powered strictly by local Ollama (<code>qwen3:4b</code>). Zero code is sent to external clouds, with bounded prompts and honest fallbacks.
+              </p>
+            </div>
+
+            <div className="card">
+              <div style={{ color: 'var(--accent-green)', marginBottom: 'var(--space-2)' }}>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="9 11 12 14 22 4"/>
+                  <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                </svg>
+              </div>
+              <h3 style={{ fontSize: 'var(--text-sm)', fontWeight: 700, marginBottom: 'var(--space-1)' }}>
+                12-Section Structured Onboarding
+              </h3>
+              <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', lineHeight: 1.6, margin: 0 }}>
+                Synthesizes verified tech stack, prerequisites, installation commands, test suites, architecture files, beginner issues, and gotchas.
+              </p>
+            </div>
+
+            <div className="card">
+              <div style={{ color: 'var(--accent-blue)', marginBottom: 'var(--space-2)' }}>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="10"/>
+                  <line x1="2" y1="12" x2="22" y2="12"/>
+                  <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                </svg>
+              </div>
+              <h3 style={{ fontSize: 'var(--text-sm)', fontWeight: 700, marginBottom: 'var(--space-1)' }}>
+                GitHub REST API Verification
+              </h3>
+              <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', lineHeight: 1.6, margin: 0 }}>
+                Directly fetches real repository trees, language breakdown statistics, and open issues while strictly filtering out pull requests.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Loading */}
       {state.kind === 'loading' && (
         <div className="loading-container">
@@ -74,21 +185,33 @@ export default function App() {
           <p className="loading-text">
             Analyzing {state.owner}/{state.repo}...
           </p>
+          <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: 'var(--space-2)' }}>
+            Retrieving repository metadata, tree files, and synthesizing onboarding steps.
+          </p>
         </div>
       )}
 
       {/* Error */}
       {state.kind === 'error' && (
         <div className="error-container fade-in">
-          <div className="error-icon">!</div>
+          <div className="error-icon" style={{ color: 'var(--accent-red)' }}>!</div>
           <h2 className="error-title">Analysis Failed</h2>
           <p className="error-detail">{state.message}</p>
-          <button
-            className="retry-btn"
-            onClick={() => handleSearch(state.owner, state.repo)}
-          >
-            Try Again
-          </button>
+          <div style={{ display: 'flex', gap: 'var(--space-3)', justifyContent: 'center', flexWrap: 'wrap' }}>
+            <button
+              className="retry-btn"
+              onClick={() => handleSearch(state.owner, state.repo)}
+            >
+              Try Again
+            </button>
+            <button
+              className="retry-btn"
+              style={{ color: 'var(--text-muted)' }}
+              onClick={() => setState({ kind: 'idle' })}
+            >
+              Back to Overview
+            </button>
+          </div>
         </div>
       )}
 
@@ -216,45 +339,45 @@ export default function App() {
               </div>
             </div>
           </div>
-
-          {/* Status Bar */}
-          <div className="status-bar">
-            {typeof state.data.rate_limit_remaining === 'number' && (
-              <div className="status-item">
-                <span className={`status-dot ${
-                  state.data.rate_limit_remaining > 100 ? 'green' :
-                  state.data.rate_limit_remaining > 10 ? 'amber' : 'red'
-                }`} />
-                API calls remaining: {state.data.rate_limit_remaining}
-              </div>
-            )}
-            {health && (
-              <>
-                <div className="status-item">
-                  <span className={`status-dot ${health.github_token_set ? 'green' : 'amber'}`} />
-                  Token: {health.github_token_set ? 'Configured (5,000 req/hr)' : 'Not set (60 req/hr)'}
-                </div>
-                <div className="status-item">
-                  <span className={`status-dot ${
-                    health.ollama_available && health.ollama_model_installed
-                      ? 'green'
-                      : health.ollama_available
-                      ? 'amber'
-                      : 'red'
-                  }`} />
-                  AI: {
-                    health.ollama_available && health.ollama_model_installed
-                      ? `Ollama (${health.target_ai_model || 'qwen3:4b'})`
-                      : health.ollama_available
-                      ? `Ollama online (${health.target_ai_model || 'qwen3:4b'} not installed)`
-                      : 'Ollama offline (Evidence fallback)'
-                  }
-                </div>
-              </>
-            )}
-          </div>
         </div>
       )}
+
+      {/* Global Status Bar */}
+      <footer className="status-bar" style={{ marginTop: 'var(--space-12)' }}>
+        {state.kind === 'success' && typeof state.data.rate_limit_remaining === 'number' && (
+          <div className="status-item">
+            <span className={`status-dot ${
+              state.data.rate_limit_remaining > 100 ? 'green' :
+              state.data.rate_limit_remaining > 10 ? 'amber' : 'red'
+            }`} />
+            API calls remaining: {state.data.rate_limit_remaining}
+          </div>
+        )}
+        {health && (
+          <>
+            <div className="status-item">
+              <span className={`status-dot ${health.github_token_set ? 'green' : 'amber'}`} />
+              Token: {health.github_token_set ? 'Configured (5,000 req/hr)' : 'Not set (60 req/hr)'}
+            </div>
+            <div className="status-item">
+              <span className={`status-dot ${
+                health.ollama_available && health.ollama_model_installed
+                  ? 'green'
+                  : health.ollama_available
+                  ? 'amber'
+                  : 'red'
+              }`} />
+              AI: {
+                health.ollama_available && health.ollama_model_installed
+                  ? `Ollama (${health.target_ai_model || 'qwen3:4b'})`
+                  : health.ollama_available
+                  ? `Ollama online (${health.target_ai_model || 'qwen3:4b'} not installed)`
+                  : 'Ollama offline (Evidence fallback)'
+              }
+            </div>
+          </>
+        )}
+      </footer>
     </div>
   );
 }
