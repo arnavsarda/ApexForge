@@ -147,6 +147,40 @@ class AnalysisResponse(BaseModel):
     full_guide_markdown: str | None = None
     ai_status: dict[str, Any] = {}
 
+    # Prompt 7: Contributor roadmap and documentation health status
+    documentation_status: DocumentationStatus | None = None
+    contributor_roadmap: list[RoadmapPhase] = []
+
+
+class DocStatusItem(BaseModel):
+    """An individual documentation health check item."""
+
+    name: str
+    filename: str | None = None
+    present: bool
+    path: str | None = None
+    description: str
+
+
+class DocumentationStatus(BaseModel):
+    """Documentation completeness health check result."""
+
+    score_percentage: int
+    present_count: int
+    total_count: int
+    health_grade: str  # "Excellent", "Good", "Needs Improvement"
+    items: list[DocStatusItem] = []
+
+
+class RoadmapPhase(BaseModel):
+    """A phase in the contributor onboarding roadmap."""
+
+    phase: int
+    title: str
+    description: str
+    milestones: list[str] = []
+    suggested_commands: list[str] = []
+
 
 class OnboardResponse(BaseModel):
     """Legacy response schema for /api/onboard/{owner}/{repo} compatibility."""
@@ -178,4 +212,58 @@ class AiTestResponse(BaseModel):
     model_installed: bool = False
     response: str | None = None
     error: str | None = None
+
+
+class ChatMessage(BaseModel):
+    """A message in an AI conversation."""
+
+    role: str  # "user" | "assistant" | "system"
+    content: str
+
+
+class RepoChatRequest(BaseModel):
+    """Payload for POST /api/chat repository-aware AI chat."""
+
+    repository_url: str | None = None
+    repo_name: str | None = None
+    question: str
+    history: list[ChatMessage] = []
+    context_overview: str | None = None
+    context_tech_stack: list[str] = []
+    context_files: list[str] = []
+    context_setup_steps: list[str] = []
+    selected_file_path: str | None = None
+    selected_file_content: str | None = None
+    current_view: str | None = None  # "dashboard" | "graph"
+
+
+class RepoChatResponse(BaseModel):
+    """Response from repository-aware AI chat."""
+
+    answer: str
+    sources: list[str] = []
+    ai_model: str | None = None
+    ai_available: bool = False
+    fallback_used: bool = False
+
+
+class RepoFileContentRequest(BaseModel):
+    """Payload for POST /api/file-content."""
+
+    repository_url: str
+    path: str
+    branch: str | None = None
+
+
+class RepoFileContentResponse(BaseModel):
+    """Response containing real file content from repository."""
+
+    path: str
+    content: str | None = None
+    size: int | None = None
+    is_binary: bool = False
+    truncated: bool = False
+    error: str | None = None
+    html_url: str | None = None
+
 

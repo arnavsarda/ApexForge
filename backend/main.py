@@ -25,15 +25,24 @@ from models import (
     AiTestRequest,
     AiTestResponse,
     LanguageBreakdown,
+    RepoChatRequest,
+    RepoChatResponse,
+    RepoFileContentRequest,
+    RepoFileContentResponse,
 )
 from validator import validate_and_parse_github_url
-from github_client import fetch_all
-from summarizer import generate_onboarding_guide
+from github_client import fetch_all, fetch_file_content_by_path
+from summarizer import (
+    generate_onboarding_guide,
+    analyze_documentation_status,
+    generate_contributor_roadmap,
+)
 from ollama_client import (
     check_ollama_health,
     generate_ai_guide,
     test_ai_inference,
     enhance_guide,
+    chat_with_repo,
     is_available as ollama_available,
     get_ollama_model,
 )
@@ -98,6 +107,8 @@ async def root():
             "ai_test": "POST /api/ai-test",
             "analyze_repo": "POST /api/analyze-repo",
             "analyze_alias": "POST /api/analyze",
+            "chat": "POST /api/chat",
+            "file_content": "POST /api/file-content",
             "onboard_legacy": "GET /api/onboard/{owner}/{repo}",
         },
     }
@@ -143,6 +154,9 @@ async def ai_test(req: AiTestRequest | None = None):
 
 async def _analyze_repository(owner: str, repo: str) -> AnalysisResponse:
     """Internal helper to fetch, synthesize, and assemble the analysis response."""
+    import time
+    t_start = time.perf_counter()
+
     try:
         data = await fetch_all(owner, repo)
     except HTTPException:
@@ -236,6 +250,15 @@ async def _analyze_repository(owner: str, repo: str) -> AnalysisResponse:
         warnings.append(f"AI Guide Synthesis: {ai_status.get('reason', 'Using rule-based evidence engine')}.")
 
     now_iso = datetime.now(timezone.utc).isoformat()
+    doc_status = analyze_documentation_status(file_tree, readme_raw, contributing_raw, meta)
+    roadmap = generate_contributor_roadmap(
+        meta=meta,
+        tech_stack=final_guide.tech_stack,
+        setup_steps=final_guide.setup_steps,
+        test_commands=final_guide.test_commands,
+        run_commands=final_guide.run_commands,
+        issues=issues,
+    )
 
     return AnalysisResponse(
         repository=meta,
@@ -263,7 +286,14 @@ async def _analyze_repository(owner: str, repo: str) -> AnalysisResponse:
         sections=final_guide.sections,
         full_guide_markdown=final_guide.full_guide_markdown,
         ai_status=ai_status,
+        documentation_status=doc_status,
+        contributor_roadmap=roadmap,
     )
+
+    duration = time.perf_counter() - t_start
+    print(f"[RepoReady Performance] Analyzed {owner}/{repo} in {duration:.2f}s (AI: {ai_status.get('reason')})")
+
+    return analysis_obj
 
 
 
@@ -279,6 +309,70 @@ async def analyze(req: AnalyzeRequest):
         raise HTTPException(status_code=400, detail="Repository URL cannot be empty.")
     owner, repo = validate_and_parse_github_url(url_to_use)
     return await _analyze_repository(owner, repo)
+
+
+@app.post("/api/chat", response_model=RepoChatResponse)
+async def repo_chat(req: RepoChatRequest):
+    """Repository-aware AI chat with local Ollama Qwen3 or evidence-grounded fallback."""
+    if not req.question or not req.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
+    repo_name = req.repo_name or "Repository"
+    if req.repository_url and not req.repo_name:
+        try:
+            o, r = validate_and_parse_github_url(req.repository_url)
+            repo_name = f"{o}/{r}"
+        except Exception:
+            pass
+
+    ctx = {
+        "overview": req.context_overview,
+        "tech_stack": req.context_tech_stack,
+        "key_files": req.context_files,
+        "setup_steps": req.context_setup_steps,
+        "selected_file_path": req.selected_file_path,
+        "selected_file_content": req.selected_file_content,
+        "current_view": req.current_view,
+    }
+
+    history_dicts = [{"role": m.role, "content": m.content} for m in req.history]
+    result = await chat_with_repo(
+        repo_name=repo_name,
+        question=req.question.strip(),
+        history=history_dicts,
+        context=ctx,
+    )
+
+    return RepoChatResponse(
+        answer=result.get("answer", "No response could be generated."),
+        sources=result.get("sources", []),
+        ai_model=result.get("ai_model"),
+        ai_available=result.get("ai_available", False),
+        fallback_used=result.get("fallback_used", False),
+    )
+
+
+@app.post("/api/file-content", response_model=RepoFileContentResponse)
+async def get_file_content(req: RepoFileContentRequest):
+    """Fetch real file contents on-demand for repository graph details view.
+
+    Protects against SSRF by strictly validating the repository URL, and prevents
+    path traversal by checking the path.
+    """
+    if not req.repository_url or not req.repository_url.strip():
+        raise HTTPException(status_code=400, detail="Repository URL is required.")
+    if not req.path or not req.path.strip():
+        raise HTTPException(status_code=400, detail="File path is required.")
+
+    owner, repo = validate_and_parse_github_url(req.repository_url)
+    res = await fetch_file_content_by_path(
+        owner=owner,
+        repo=repo,
+        path=req.path.strip(),
+        branch=req.branch or "main",
+    )
+    return RepoFileContentResponse(**res)
+
 
 
 @app.get("/api/onboard/{owner}/{repo}", response_model=OnboardResponse)

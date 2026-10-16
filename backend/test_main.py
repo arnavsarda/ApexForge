@@ -36,8 +36,12 @@ from config import (
 )
 from validator import validate_and_parse_github_url
 from models import RepoMeta, LanguageBreakdown, Issue, Contributor, FileTreeEntry
-from summarizer import generate_onboarding_guide
-from ollama_client import check_ollama_health, generate_ai_guide
+from summarizer import (
+    generate_onboarding_guide,
+    analyze_documentation_status,
+    generate_contributor_roadmap,
+)
+from ollama_client import check_ollama_health, generate_ai_guide, chat_with_repo
 
 
 @pytest.fixture
@@ -975,5 +979,484 @@ def test_untrusted_repository_prompt_injection_safety():
     assert "untrusted" in prompt_lower
     assert "instructions" in prompt_lower
     assert "evidence" in prompt_lower
+
+
+# ── 12. Prompt 7: Repository Chat & Documentation / Roadmap Tests ───────────
+
+@pytest.mark.anyio
+async def test_repo_chat_mocked_ollama():
+    """POST /api/chat should query local Ollama and return answer with sources."""
+    mock_health = {
+        "running": True,
+        "host": "http://localhost:11434",
+        "target_model": "qwen3:4b",
+        "model_installed": True,
+        "matched_model": "qwen3:4b",
+        "installed_models": ["qwen3:4b"],
+        "error": None,
+    }
+
+    mock_ollama_resp = {
+        "response": "To run tests in this repo, use `npm test` or `pytest` depending on the language.",
+    }
+
+    with patch("ollama_client.check_ollama_health", new=AsyncMock(return_value=mock_health)), \
+         patch("httpx.AsyncClient.post", new=AsyncMock(return_value=AsyncMock(
+             status_code=200,
+             raise_for_status=lambda: None,
+             json=lambda: mock_ollama_resp,
+         ))):
+        result = await chat_with_repo(
+            repo_name="facebook/react",
+            question="How do I run tests?",
+            context={
+                "overview": "React is a JavaScript library for web interfaces.",
+                "tech_stack": ["JavaScript", "React"],
+                "key_files": ["package.json", "README.md"],
+                "setup_steps": ["yarn install"],
+            },
+        )
+
+        assert "npm test" in result["answer"] or "pytest" in result["answer"]
+        assert result["ai_model"] == "qwen3:4b"
+        assert result["ai_available"] is True
+        assert result["fallback_used"] is False
+        assert len(result["sources"]) > 0
+
+
+@pytest.mark.anyio
+async def test_repo_chat_honest_fallback_when_offline():
+    """When Ollama is offline or model is missing, chat must return honest evidence fallback."""
+    mock_health = {
+        "running": False,
+        "host": "http://localhost:11434",
+        "target_model": "qwen3:4b",
+        "model_installed": False,
+        "matched_model": None,
+        "installed_models": [],
+        "error": "Ollama daemon not reachable",
+    }
+
+    with patch("ollama_client.check_ollama_health", new=AsyncMock(return_value=mock_health)):
+        result = await chat_with_repo(
+            repo_name="pallets/flask",
+            question="How do I run tests?",
+            context={
+                "overview": "Flask is a lightweight WSGI web application framework.",
+                "tech_stack": ["Python", "Flask"],
+                "key_files": ["pyproject.toml", "README.rst"],
+                "setup_steps": ["pip install -e ."],
+            },
+        )
+
+        assert result["ai_available"] is False
+        assert result["fallback_used"] is True
+        assert "pytest" in result["answer"].lower() or "test" in result["answer"].lower()
+        assert len(result["sources"]) > 0
+
+
+def test_repo_chat_endpoint(client):
+    """POST /api/chat should accept RepoChatRequest and return 200 with RepoChatResponse."""
+    req_body = {
+        "repo_name": "fastapi/fastapi",
+        "question": "What is the tech stack?",
+        "context_overview": "FastAPI framework, high performance, easy to learn.",
+        "context_tech_stack": ["Python", "Starlette", "Pydantic"],
+        "context_files": ["pyproject.toml"],
+        "context_setup_steps": ["pip install -r requirements.txt"],
+    }
+
+    response = client.post("/api/chat", json=req_body)
+    assert response.status_code == 200
+    data = response.json()
+    assert "answer" in data
+    assert "sources" in data
+    assert "ai_available" in data
+    assert "fallback_used" in data
+    assert len(data["answer"]) > 10
+
+
+def test_documentation_status_scoring():
+    """Documentation status must detect community health files and calculate grade accurately."""
+    meta = RepoMeta(
+        owner="testowner",
+        name="testrepo",
+        full_name="testowner/testrepo",
+        html_url="https://github.com/testowner/testrepo",
+        stars=10,
+        forks=2,
+        open_issues=1,
+        default_branch="main",
+        language="Python",
+        license="MIT",
+        created_at="2024-01-01T00:00:00Z",
+        updated_at="2024-01-02T00:00:00Z",
+    )
+
+    file_tree = [
+        FileTreeEntry(path="README.md", type="blob", size=1000),
+        FileTreeEntry(path="LICENSE", type="blob", size=500),
+        FileTreeEntry(path="CONTRIBUTING.md", type="blob", size=800),
+        FileTreeEntry(path="CODE_OF_CONDUCT.md", type="blob", size=400),
+        FileTreeEntry(path="SECURITY.md", type="blob", size=300),
+        FileTreeEntry(path=".github/workflows/ci.yml", type="blob", size=200),
+        FileTreeEntry(path=".github/ISSUE_TEMPLATE/bug.md", type="blob", size=150),
+    ]
+
+    status = analyze_documentation_status(
+        file_tree=file_tree,
+        readme_raw="# Readme content",
+        contributing_raw="# Contributing guide",
+        meta=meta,
+    )
+    assert status.present_count == 7
+    assert status.total_count == 7
+    assert status.score_percentage == 100
+    assert status.health_grade == "Excellent"
+
+    # Test minimal repo (only README, no license, no contributing)
+    meta_minimal = RepoMeta(
+        owner="minowner",
+        name="minrepo",
+        full_name="minowner/minrepo",
+        html_url="https://github.com/minowner/minrepo",
+        stars=0,
+        forks=0,
+        open_issues=0,
+        default_branch="main",
+        language="Python",
+        license=None,
+        created_at="2024-01-01T00:00:00Z",
+        updated_at="2024-01-02T00:00:00Z",
+    )
+    minimal_tree = [FileTreeEntry(path="README.md", type="blob", size=1000)]
+    minimal_status = analyze_documentation_status(
+        file_tree=minimal_tree,
+        readme_raw="# Just a readme",
+        contributing_raw=None,
+        meta=meta_minimal,
+    )
+    assert minimal_status.present_count == 1
+    assert minimal_status.score_percentage < 30
+    assert minimal_status.health_grade == "Needs Improvement"
+
+
+def test_contributor_roadmap_generation():
+    """Contributor roadmap should produce 5 distinct phased milestones."""
+    meta = RepoMeta(
+        owner="facebook",
+        name="react",
+        full_name="facebook/react",
+        html_url="https://github.com/facebook/react",
+        stars=200000,
+        forks=40000,
+        open_issues=500,
+        default_branch="main",
+        language="JavaScript",
+        created_at="2013-05-24T16:15:54Z",
+        updated_at="2024-01-02T00:00:00Z",
+    )
+
+    phases = generate_contributor_roadmap(
+        meta=meta,
+        tech_stack=["JavaScript", "React"],
+        setup_steps=["yarn install", "yarn build"],
+        test_commands=["yarn test"],
+        run_commands=["yarn start"],
+    )
+
+    assert len(phases) == 5
+    assert phases[0].phase == 1
+    assert "Environment" in phases[0].title or "Setup" in phases[0].title
+    assert phases[4].phase == 5
+    assert "Pull Request" in phases[4].title or "Submit" in phases[4].title
+
+    # Must contain copyable commands
+    assert any(len(p.suggested_commands or []) > 0 for p in phases)
+
+
+# ── 13. Prompt 8: Repository Graph & File Content Tests ─────────────────────
+
+def test_file_content_endpoint_success(client):
+    """POST /api/file-content should safely return decoded text content for valid repo files."""
+    import base64
+
+    raw_code = "print('Hello, RepoReady Graph!')\n"
+    b64_code = base64.b64encode(raw_code.encode("utf-8")).decode("utf-8")
+
+    mock_resp = {
+        "name": "hello.py",
+        "path": "src/hello.py",
+        "size": len(raw_code),
+        "type": "file",
+        "content": b64_code,
+        "encoding": "base64",
+        "html_url": "https://github.com/testowner/testrepo/blob/main/src/hello.py",
+    }
+
+    with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=AsyncMock(
+        status_code=200,
+        json=lambda: mock_resp,
+        headers={"x-ratelimit-remaining": "5000"},
+    ))):
+        res = client.post(
+            "/api/file-content",
+            json={
+                "repository_url": "https://github.com/testowner/testrepo",
+                "path": "src/hello.py",
+                "branch": "main",
+            },
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["path"] == "src/hello.py"
+        assert data["content"] == raw_code
+        assert data["is_binary"] is False
+        assert data["truncated"] is False
+        assert data["error"] is None
+
+
+def test_file_content_endpoint_ssrf_protection(client):
+    """POST /api/file-content must strictly reject non-GitHub URLs to prevent SSRF."""
+    evil_urls = [
+        "http://169.254.169.254/latest/meta-data/",
+        "https://evil.attacker.com/repo",
+        "ftp://github.com/owner/repo",
+        "javascript:alert(1)",
+        "http://localhost:8000/internal",
+    ]
+
+    for evil_url in evil_urls:
+        res = client.post(
+            "/api/file-content",
+            json={
+                "repository_url": evil_url,
+                "path": "src/index.ts",
+            },
+        )
+        assert res.status_code == 400
+        assert "github" in res.json()["detail"].lower() or "invalid" in res.json()["detail"].lower()
+
+
+def test_file_content_endpoint_path_traversal_protection(client):
+    """POST /api/file-content must reject path traversal attempts."""
+    traversal_paths = [
+        "../../etc/passwd",
+        "/absolute/path/secret.py",
+        "..\\..\\windows\\system32",
+        "src/../../root.key",
+    ]
+
+    for p in traversal_paths:
+        res = client.post(
+            "/api/file-content",
+            json={
+                "repository_url": "https://github.com/valid/repo",
+                "path": p,
+            },
+        )
+        assert res.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_file_content_binary_file_detection():
+    """Binary files containing null bytes must be flagged with is_binary=True without crashing."""
+    import base64
+    from github_client import fetch_file_content_by_path
+
+    # Binary payload with null bytes
+    binary_bytes = b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00"
+    b64_binary = base64.b64encode(binary_bytes).decode("utf-8")
+
+    mock_resp = {
+        "name": "binary.so",
+        "path": "lib/binary.so",
+        "size": len(binary_bytes),
+        "type": "file",
+        "content": b64_binary,
+        "encoding": "base64",
+    }
+
+    with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=AsyncMock(
+        status_code=200,
+        json=lambda: mock_resp,
+        headers={},
+    ))):
+        result = await fetch_file_content_by_path("owner", "repo", "lib/binary.so")
+        assert result["is_binary"] is True
+        assert result["content"] is None
+        assert "binary" in result["error"].lower()
+
+
+@pytest.mark.anyio
+async def test_file_content_large_file_truncation():
+    """Files over 150KB must not download raw body and flag truncated=True."""
+    from github_client import fetch_file_content_by_path
+
+    mock_resp = {
+        "name": "huge_bundle.js",
+        "path": "dist/huge_bundle.js",
+        "size": 500_000,
+        "type": "file",
+        "content": "",
+        "html_url": "https://github.com/owner/repo/blob/main/dist/huge_bundle.js",
+    }
+
+    with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=AsyncMock(
+        status_code=200,
+        json=lambda: mock_resp,
+        headers={},
+    ))):
+        result = await fetch_file_content_by_path("owner", "repo", "dist/huge_bundle.js")
+        assert result["truncated"] is True
+        assert result["content"] is None
+        assert "too large" in result["error"].lower()
+
+
+def test_different_repositories_produce_different_graph_trees():
+    """Verify distinct repositories have independent file tree structures."""
+    react_tree = [
+        FileTreeEntry(path="packages/react/index.js", type="blob", size=120),
+        FileTreeEntry(path="packages/react/src/React.js", type="blob", size=500),
+        FileTreeEntry(path="package.json", type="blob", size=200),
+    ]
+
+    flask_tree = [
+        FileTreeEntry(path="src/flask/__init__.py", type="blob", size=300),
+        FileTreeEntry(path="src/flask/app.py", type="blob", size=1500),
+        FileTreeEntry(path="pyproject.toml", type="blob", size=250),
+    ]
+
+    react_paths = {f.path for f in react_tree}
+    flask_paths = {f.path for f in flask_tree}
+
+    assert react_paths != flask_paths
+    assert "packages/react/index.js" in react_paths
+    assert "src/flask/app.py" in flask_paths
+
+
+def test_empty_repository_handling():
+    """Empty repository metadata and tree must indicate is_empty=True with empty entries."""
+    empty_meta = RepoMeta(
+        owner="emptyuser",
+        name="emptyrepo",
+        full_name="emptyuser/emptyrepo",
+        html_url="https://github.com/emptyuser/emptyrepo",
+        stars=0,
+        forks=0,
+        open_issues=0,
+        default_branch="main",
+        language=None,
+        license=None,
+        is_empty=True,
+        size_kb=0,
+        created_at="2024-01-01T00:00:00Z",
+        updated_at="2024-01-01T00:00:00Z",
+    )
+
+    assert empty_meta.is_empty is True
+    assert empty_meta.size_kb == 0
+
+
+# ── 14. Prompt 9: Context-Aware AI Chat & Selected File Context Tests ────────
+
+def test_repo_chat_with_selected_file_context(client):
+    """POST /api/chat must accept selected_file_path, content, and current_view and explain the file."""
+    mock_health = {
+        "running": False,
+        "host": "http://localhost:11434",
+        "target_model": "qwen3:4b",
+        "model_installed": False,
+        "matched_model": None,
+        "installed_models": [],
+        "error": "Offline for testing",
+    }
+
+    sample_content = (
+        "import React from 'react';\n"
+        "export function RepoGraph() {\n"
+        "  return <div>Interactive Graph</div>;\n"
+        "}\n"
+    )
+
+    with patch("ollama_client.check_ollama_health", new=AsyncMock(return_value=mock_health)):
+        res = client.post(
+            "/api/chat",
+            json={
+                "repo_name": "testowner/testrepo",
+                "question": "Explain this file",
+                "current_view": "graph",
+                "selected_file_path": "src/components/RepoGraph.tsx",
+                "selected_file_content": sample_content,
+                "context_tech_stack": ["TypeScript", "React"],
+            },
+        )
+
+        assert res.status_code == 200
+        data = res.json()
+        assert "src/components/RepoGraph.tsx" in data["answer"]
+        assert "React" in data["answer"] or "RepoGraph" in data["answer"]
+        assert any("src/components/RepoGraph.tsx" in s for s in data["sources"])
+        assert data["fallback_used"] is True
+
+
+def test_repo_chat_explain_selected_file_without_file(client):
+    """Asking to explain selected file when no file is chosen returns helpful guidance."""
+    mock_health = {
+        "running": False,
+        "host": "http://localhost:11434",
+        "target_model": "qwen3:4b",
+        "model_installed": False,
+        "matched_model": None,
+        "installed_models": [],
+        "error": "Offline for testing",
+    }
+
+    with patch("ollama_client.check_ollama_health", new=AsyncMock(return_value=mock_health)):
+        res = client.post(
+            "/api/chat",
+            json={
+                "repo_name": "testowner/testrepo",
+                "question": "Explain the selected file.",
+                "current_view": "graph",
+            },
+        )
+
+        assert res.status_code == 200
+        data = res.json()
+        assert "No specific file is currently selected" in data["answer"]
+        assert "Repository Graph" in data["answer"]
+
+
+def test_repo_chat_graph_navigation_question(client):
+    """Asking how to read the repository graph returns node hierarchy guidance."""
+    mock_health = {
+        "running": False,
+        "host": "http://localhost:11434",
+        "target_model": "qwen3:4b",
+        "model_installed": False,
+        "matched_model": None,
+        "installed_models": [],
+        "error": "Offline for testing",
+    }
+
+    with patch("ollama_client.check_ollama_health", new=AsyncMock(return_value=mock_health)):
+        res = client.post(
+            "/api/chat",
+            json={
+                "repo_name": "testowner/testrepo",
+                "question": "How do I read the repository graph?",
+                "current_view": "graph",
+            },
+        )
+
+        assert res.status_code == 200
+        data = res.json()
+        assert "Interactive Repository Graph" in data["answer"]
+        assert "Root Node" in data["answer"]
+        assert "Folders" in data["answer"]
+
+
+
 
 

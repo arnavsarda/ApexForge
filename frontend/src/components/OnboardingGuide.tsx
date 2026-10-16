@@ -20,6 +20,39 @@ export default function OnboardingGuide({ guide }: Props) {
     }
   };
 
+  const handleExportMd = () => {
+    const content = guide.full_guide_markdown || guide.summary;
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'onboarding-guide.md';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportTxt = () => {
+    let content = guide.full_guide_markdown || guide.summary;
+    // Strip markdown formatting for plain text
+    content = content
+      .replace(/^#+\s+/gm, '')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/\*([^*]+)\*/g, '$1')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/```[a-z]*\n([\s\S]*?)```/gm, '$1');
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'onboarding-guide.txt';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   // Determine honest AI badge display
   const renderBadge = () => {
     if (guide.ai_enhanced) {
@@ -172,6 +205,50 @@ export default function OnboardingGuide({ guide }: Props) {
                 Copy
               </>
             )}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleExportMd}
+            className="retry-btn"
+            style={{
+              padding: '4px 10px',
+              fontSize: 'var(--text-xs)',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '4px',
+              color: 'var(--accent-blue)',
+            }}
+            title="Download Onboarding Guide as Markdown (.md)"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Export .md
+          </button>
+
+          <button
+            type="button"
+            onClick={handleExportTxt}
+            className="retry-btn"
+            style={{
+              padding: '4px 10px',
+              fontSize: 'var(--text-xs)',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '4px',
+              color: 'var(--accent-cyan)',
+            }}
+            title="Download Onboarding Guide as Plain Text (.txt)"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Export .txt
           </button>
         </div>
       </div>

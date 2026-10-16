@@ -360,6 +360,165 @@ async def fetch_config_file(owner: str, repo: str, path: str) -> tuple[str, str 
     return path, None
 
 
+async def fetch_file_content_by_path(
+    owner: str, repo: str, path: str, branch: str = "main"
+) -> dict[str, Any]:
+    """Fetch real file content safely from GitHub Contents API.
+
+    Prevents directory traversal and limits file size to avoid memory exhaustion.
+    """
+    import base64
+
+    # Reject absolute paths and directory traversal
+    if path.startswith("/") or path.startswith("\\") or ".." in path:
+        raise HTTPException(status_code=400, detail="Invalid file path.")
+
+    clean_path = path.strip()
+
+    async with _client() as c:
+        try:
+            r = await c.get(
+                f"/repos/{owner}/{repo}/contents/{clean_path}",
+                params={"ref": branch} if branch else {},
+                headers={**get_github_headers(), "Accept": "application/vnd.github+json"},
+            )
+            if r.status_code == 404:
+                return {
+                    "path": clean_path,
+                    "content": None,
+                    "size": None,
+                    "is_binary": False,
+                    "truncated": False,
+                    "error": "File not found in repository.",
+                    "html_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{clean_path}",
+                }
+            if r.status_code in (403, 429):
+                remaining = r.headers.get("x-ratelimit-remaining", "0")
+                return {
+                    "path": clean_path,
+                    "content": None,
+                    "size": None,
+                    "is_binary": False,
+                    "truncated": False,
+                    "error": f"GitHub API rate limit exceeded ({remaining} remaining).",
+                    "html_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{clean_path}",
+                }
+            if r.status_code != 200:
+                return {
+                    "path": clean_path,
+                    "content": None,
+                    "size": None,
+                    "is_binary": False,
+                    "truncated": False,
+                    "error": f"GitHub API error (HTTP {r.status_code}).",
+                    "html_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{clean_path}",
+                }
+
+            data = r.json()
+            if not isinstance(data, dict):
+                return {
+                    "path": clean_path,
+                    "content": None,
+                    "size": None,
+                    "is_binary": False,
+                    "truncated": False,
+                    "error": "Unexpected GitHub response structure.",
+                    "html_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{clean_path}",
+                }
+
+            if data.get("type") != "file":
+                return {
+                    "path": clean_path,
+                    "content": None,
+                    "size": None,
+                    "is_binary": False,
+                    "truncated": False,
+                    "error": f"Path is a {data.get('type')}, not a regular file.",
+                    "html_url": data.get("html_url") or f"https://github.com/{owner}/{repo}/blob/{branch}/{clean_path}",
+                }
+
+            file_size = data.get("size", 0)
+            html_url = data.get("html_url") or f"https://github.com/{owner}/{repo}/blob/{branch}/{clean_path}"
+
+            # If file is over 150 KB, don't download full content
+            if file_size > 150_000:
+                return {
+                    "path": clean_path,
+                    "content": None,
+                    "size": file_size,
+                    "is_binary": False,
+                    "truncated": True,
+                    "error": f"File is too large to preview directly ({round(file_size / 1024, 1)} KB). View on GitHub.",
+                    "html_url": html_url,
+                }
+
+            raw_b64 = data.get("content")
+            if not raw_b64:
+                return {
+                    "path": clean_path,
+                    "content": "",
+                    "size": file_size,
+                    "is_binary": False,
+                    "truncated": False,
+                    "error": None,
+                    "html_url": html_url,
+                }
+
+            try:
+                decoded_bytes = base64.b64decode(raw_b64.replace("\n", ""))
+                # Check for binary null bytes
+                if b"\x00" in decoded_bytes[:1024]:
+                    return {
+                        "path": clean_path,
+                        "content": None,
+                        "size": file_size,
+                        "is_binary": True,
+                        "truncated": False,
+                        "error": "Binary file preview not supported in browser.",
+                        "html_url": html_url,
+                    }
+                content_text = decoded_bytes.decode("utf-8", errors="replace")
+                return {
+                    "path": clean_path,
+                    "content": content_text,
+                    "size": file_size,
+                    "is_binary": False,
+                    "truncated": False,
+                    "error": None,
+                    "html_url": html_url,
+                }
+            except Exception as e:
+                return {
+                    "path": clean_path,
+                    "content": None,
+                    "size": file_size,
+                    "is_binary": True,
+                    "truncated": False,
+                    "error": f"Could not decode file content: {str(e)}",
+                    "html_url": html_url,
+                }
+        except httpx.TimeoutException:
+            return {
+                "path": clean_path,
+                "content": None,
+                "size": None,
+                "is_binary": False,
+                "truncated": False,
+                "error": "Timeout while fetching file from GitHub.",
+                "html_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{clean_path}",
+            }
+        except Exception as e:
+            return {
+                "path": clean_path,
+                "content": None,
+                "size": None,
+                "is_binary": False,
+                "truncated": False,
+                "error": f"Network error: {str(e)}",
+                "html_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{clean_path}",
+            }
+
+
 async def fetch_readme_html(owner: str, repo: str) -> str | None:
     """Fetch the rendered README as HTML."""
     async with _client() as c:
@@ -439,8 +598,27 @@ async def get_rate_limit() -> int | None:
     return None
 
 
+# ── In-Memory Repository Cache (TTL: 5 minutes) ─────────────────────────────
+_REPO_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_CACHE_TTL_SECONDS = 300.0
+
+
+def clear_repo_cache() -> None:
+    """Clear in-memory repository analysis cache (for testing or manual invalidation)."""
+    _REPO_CACHE.clear()
+
+
 async def fetch_all(owner: str, repo: str) -> dict[str, Any]:
-    """Fetch all repository data concurrently."""
+    """Fetch all repository data concurrently with in-memory TTL caching."""
+    import time
+
+    cache_key = f"{owner.lower()}/{repo.lower()}"
+    now = time.time()
+    if cache_key in _REPO_CACHE:
+        cached_time, cached_data = _REPO_CACHE[cache_key]
+        if now - cached_time < _CACHE_TTL_SECONDS:
+            return cached_data
+
     # 1. Fetch repo metadata first (required for default_branch and size)
     meta, _ = await fetch_repo(owner, repo)
     branch = meta.default_branch
@@ -534,7 +712,7 @@ async def fetch_all(owner: str, repo: str) -> dict[str, Any]:
     if isinstance(contrib_res, tuple) and contrib_res[0] is not None:
         contributing_raw, contributing_path = contrib_res[0], contrib_res[1]
 
-    return {
+    result_payload = {
         "meta": meta,
         "languages": langs,
         "beginner_issues": issues,
@@ -547,3 +725,6 @@ async def fetch_all(owner: str, repo: str) -> dict[str, Any]:
         "rate_limit_remaining": rate,
         "config_files": config_files,
     }
+
+    _REPO_CACHE[cache_key] = (now, result_payload)
+    return result_payload

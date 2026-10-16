@@ -11,7 +11,16 @@ import json
 import re
 from typing import Any
 
-from models import OnboardingGuide, RepoMeta, LanguageBreakdown, FileTreeEntry, Issue
+from models import (
+    OnboardingGuide,
+    RepoMeta,
+    LanguageBreakdown,
+    FileTreeEntry,
+    Issue,
+    DocStatusItem,
+    DocumentationStatus,
+    RoadmapPhase,
+)
 
 
 # ── Tech-Stack Detection ───────────────────────────────────────────────────
@@ -785,4 +794,195 @@ def generate_onboarding_guide(
             "fallback_used": False,
         },
     )
+
+
+# ── Documentation Health & Contributor Roadmap ──────────────────────────────
+
+def analyze_documentation_status(
+    file_tree: list[FileTreeEntry],
+    readme_raw: str | None,
+    contributing_raw: str | None,
+    meta: RepoMeta,
+) -> DocumentationStatus:
+    """Evaluate repository documentation health and return checklist items."""
+    file_paths = {f.path.lower(): f.path for f in file_tree}
+
+    # 1. README
+    has_readme = bool(readme_raw) or any("readme" in p for p in file_paths)
+    readme_path = next((orig for p, orig in file_paths.items() if "readme" in p), None)
+    if not readme_path and readme_raw:
+        readme_path = "README.md"
+
+    # 2. CONTRIBUTING
+    has_contrib = bool(contributing_raw) or any("contributing" in p for p in file_paths)
+    contrib_path = next((orig for p, orig in file_paths.items() if "contributing" in p), None)
+
+    # 3. LICENSE
+    has_license = bool(meta.license) or any("license" in p for p in file_paths)
+    license_path = next((orig for p, orig in file_paths.items() if "license" in p), None)
+
+    # 4. Code of Conduct
+    has_coc = any("code_of_conduct" in p for p in file_paths)
+    coc_path = next((orig for p, orig in file_paths.items() if "code_of_conduct" in p), None)
+
+    # 5. Security Policy
+    has_sec = any("security.md" in p for p in file_paths)
+    sec_path = next((orig for p, orig in file_paths.items() if "security.md" in p), None)
+
+    # 6. Issue & PR Templates
+    has_templates = any("issue_template" in p or "pull_request_template" in p for p in file_paths)
+    template_path = next((orig for p, orig in file_paths.items() if "issue_template" in p or "pull_request_template" in p), None)
+
+    # 7. CI / Workflows
+    has_ci = any(".github/workflows" in p or ".circleci" in p or ".travis.yml" in p for p in file_paths)
+    ci_path = next((orig for p, orig in file_paths.items() if ".github/workflows" in p), None)
+
+    items = [
+        DocStatusItem(
+            name="README Documentation",
+            filename=readme_path or "README.md",
+            present=has_readme,
+            path=readme_path,
+            description="Project overview, installation guides, and primary documentation.",
+        ),
+        DocStatusItem(
+            name="Contribution Guidelines",
+            filename=contrib_path or "CONTRIBUTING.md",
+            present=has_contrib,
+            path=contrib_path,
+            description="How to set up development, branch, and submit pull requests.",
+        ),
+        DocStatusItem(
+            name="Open-Source License",
+            filename=license_path or "LICENSE",
+            present=has_license,
+            path=license_path,
+            description=f"Legal terms for using and contributing ({meta.license or 'Undetected'}).",
+        ),
+        DocStatusItem(
+            name="Code of Conduct",
+            filename=coc_path or "CODE_OF_CONDUCT.md",
+            present=has_coc,
+            path=coc_path,
+            description="Community standards, behavioral guidelines, and reporting.",
+        ),
+        DocStatusItem(
+            name="Security Policy",
+            filename=sec_path or "SECURITY.md",
+            present=has_sec,
+            path=sec_path,
+            description="Vulnerability disclosure and security contact procedures.",
+        ),
+        DocStatusItem(
+            name="Issue & PR Templates",
+            filename=template_path or ".github/ISSUE_TEMPLATE",
+            present=has_templates,
+            path=template_path,
+            description="Standardized forms for bug reports, features, and pull requests.",
+        ),
+        DocStatusItem(
+            name="CI/CD Workflows",
+            filename=ci_path or ".github/workflows",
+            present=has_ci,
+            path=ci_path,
+            description="Automated tests, linting, and build verification pipelines.",
+        ),
+    ]
+
+    present_count = sum(1 for it in items if it.present)
+    total_count = len(items)
+    pct = int((present_count / total_count) * 100) if total_count > 0 else 0
+    grade = "Excellent" if pct >= 80 else ("Good" if pct >= 50 else "Needs Improvement")
+
+    return DocumentationStatus(
+        score_percentage=pct,
+        present_count=present_count,
+        total_count=total_count,
+        health_grade=grade,
+        items=items,
+    )
+
+
+def generate_contributor_roadmap(
+    meta: RepoMeta,
+    tech_stack: list[str],
+    setup_steps: list[str],
+    test_commands: list[str],
+    run_commands: list[str],
+    issues: list[Issue] | None = None,
+) -> list[RoadmapPhase]:
+    """Build a phased contributor onboarding roadmap based on real repository data."""
+    # Phase 1: Environment Setup
+    p1_cmds = [s for s in setup_steps if any(cmd in s for cmd in ("git clone", "npm install", "pip install", "cargo build", "go mod"))]
+    if not p1_cmds:
+        p1_cmds = [f"git clone {meta.html_url}", f"cd {meta.name}"]
+    phase1 = RoadmapPhase(
+        phase=1,
+        title="Environment Setup & Prerequisites",
+        description="Clone the repository, configure runtime tools, and install verified dependencies.",
+        milestones=[
+            f"Fork {meta.full_name} on GitHub and clone locally",
+            "Verify runtime versions matching detected stack: " + (", ".join(tech_stack[:3]) or "core language"),
+            "Install project dependencies into an isolated environment",
+        ],
+        suggested_commands=p1_cmds[:3],
+    )
+
+    # Phase 2: Architecture Exploration
+    phase2 = RoadmapPhase(
+        phase=2,
+        title="Architecture Exploration",
+        description="Understand key entrypoints, configuration manifests, and project modules.",
+        milestones=[
+            "Review README.md and documentation guidelines",
+            f"Inspect key directory structure on default branch '{meta.default_branch}'",
+            "Identify central routers, entrypoint scripts, and core utilities",
+        ],
+        suggested_commands=[f"git checkout -b explore-{meta.name}"],
+    )
+
+    # Phase 3: Run & Verify Test Suite
+    t_cmds = test_commands if test_commands else (["npm test"] if "JavaScript" in tech_stack or "TypeScript" in tech_stack else ["pytest"])
+    phase3 = RoadmapPhase(
+        phase=3,
+        title="Verify Local Build & Test Suite",
+        description="Ensure all existing unit tests and lint suites pass before modifying any code.",
+        milestones=[
+            "Execute the repository test suite locally",
+            "Verify that local test execution produces 0 failures",
+            "Check formatting or lint rules if configured",
+        ],
+        suggested_commands=t_cmds[:2],
+    )
+
+    # Phase 4: Select Your First Issue
+    iss_count = len(issues or [])
+    phase4 = RoadmapPhase(
+        phase=4,
+        title="Select a Starter Contribution",
+        description="Pick a beginner-friendly issue, documentation improvement, or test addition.",
+        milestones=[
+            f"Browse {iss_count} open starter issues or triage documentation gaps",
+            "Comment on the issue to declare interest and discuss approach",
+            "Create a clean feature branch: git checkout -b fix/your-fix",
+        ],
+        suggested_commands=["git checkout -b fix/starter-issue"],
+    )
+
+    # Phase 5: Pull Request & Code Review
+    phase5 = RoadmapPhase(
+        phase=5,
+        title="Submit Pull Request & Review",
+        description="Push your branch, open a descriptive PR, and collaborate with maintainers.",
+        milestones=[
+            "Commit small, atomic changes with clear messages",
+            "Push feature branch to your GitHub fork",
+            "Open Pull Request following repository PR guidelines",
+            "Address maintainer feedback and CI test checks",
+        ],
+        suggested_commands=["git push origin fix/starter-issue"],
+    )
+
+    return [phase1, phase2, phase3, phase4, phase5]
+
 

@@ -18,6 +18,8 @@ export interface RepoMeta {
   updated_at: string;
   license: string | null;
   has_wiki: boolean;
+  is_empty?: boolean;
+  size_kb?: number;
 }
 
 export interface LanguageBreakdown {
@@ -107,6 +109,59 @@ export interface AnalysisResponse {
     fallback_used?: boolean;
     reason?: string;
   };
+  documentation_status?: DocumentationStatus;
+  contributor_roadmap?: RoadmapPhase[];
+}
+
+export interface DocStatusItem {
+  name: string;
+  filename?: string | null;
+  present: boolean;
+  path?: string | null;
+  description: string;
+}
+
+export interface DocumentationStatus {
+  score_percentage: number;
+  present_count: number;
+  total_count: number;
+  health_grade: string;
+  items: DocStatusItem[];
+}
+
+export interface RoadmapPhase {
+  phase: number;
+  title: string;
+  description: string;
+  milestones: string[];
+  suggested_commands?: string[];
+}
+
+export interface ChatMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+
+export interface RepoChatRequest {
+  repository_url?: string | null;
+  repo_name?: string | null;
+  question: string;
+  history?: ChatMessage[];
+  context_overview?: string | null;
+  context_tech_stack?: string[];
+  context_files?: string[];
+  context_setup_steps?: string[];
+  selected_file_path?: string | null;
+  selected_file_content?: string | null;
+  current_view?: string | null;
+}
+
+export interface RepoChatResponse {
+  answer: string;
+  sources: string[];
+  ai_model?: string | null;
+  ai_available: boolean;
+  fallback_used: boolean;
 }
 
 export interface OnboardResponse {
@@ -208,3 +263,52 @@ export async function fetchHealth(): Promise<HealthResponse> {
   if (!fallback.ok) throw new Error('Backend unreachable');
   return fallback.json();
 }
+
+/**
+ * Send a question to repository-aware AI chat.
+ */
+export async function sendRepoChat(req: RepoChatRequest): Promise<RepoChatResponse> {
+  const res = await fetch(`${API_BASE}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    const err: ApiError = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error(err.detail);
+  }
+  return res.json();
+}
+
+export interface RepoFileContentRequest {
+  repository_url: string;
+  path: string;
+  branch?: string;
+}
+
+export interface RepoFileContentResponse {
+  path: string;
+  content: string | null;
+  size: number | null;
+  is_binary: boolean;
+  truncated: boolean;
+  error: string | null;
+  html_url: string | null;
+}
+
+/**
+ * Fetch real file contents on-demand for repository graph details view.
+ */
+export async function fetchFileContent(req: RepoFileContentRequest): Promise<RepoFileContentResponse> {
+  const res = await fetch(`${API_BASE}/api/file-content`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    const err: ApiError = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+    throw new Error(err.detail);
+  }
+  return res.json();
+}
+

@@ -15,7 +15,8 @@ from config import get_ollama_host, get_ollama_model
 from models import OnboardingGuide, Issue
 
 CONNECT_TIMEOUT = 3.0
-GENERATE_TIMEOUT = 35.0
+GENERATE_TIMEOUT = 10.0  # Fast bounded summary for initial analysis target (10-15s)
+CHAT_TIMEOUT = 60.0      # Ample time for free-text local neural chat inference on CPU
 MAX_README_CONTEXT = 2500
 MAX_MANIFEST_CONTEXT = 1200
 MAX_CONTRIB_CONTEXT = 1500
@@ -293,7 +294,7 @@ Return your response in clean markdown."""
                     "prompt": prompt,
                     "stream": False,
                     "options": {
-                        "num_predict": 500,
+                        "num_predict": 200,
                         "temperature": 0.4,
                     },
                 },
@@ -379,16 +380,277 @@ Write a concise, welcoming, evidence-based onboarding summary under 300 words:""
                     "model": model,
                     "prompt": prompt,
                     "stream": False,
+                    "think": False,
                     "options": {
-                        "num_predict": 400,
-                        "temperature": 0.5,
+                        "num_predict": 200,
+                        "temperature": 0.4,
                     },
                 },
             )
             if r.status_code == 200:
-                return r.json().get("response")
+                data = r.json()
+                return data.get("response") or data.get("thinking")
     except Exception:
         pass
 
     return None
+
+
+async def chat_with_repo(
+    repo_name: str,
+    question: str,
+    history: list[dict[str, str]] | None = None,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Answer a repository-specific question using local Ollama Qwen3 or an evidence-based fallback.
+
+    Treats repository content as UNTRUSTED EVIDENCE. Supports selected file inspection
+    and repository graph navigation context.
+    """
+    health = await check_ollama_health()
+    target = health["target_model"]
+    ctx = context or {}
+    overview = ctx.get("overview") or "No overview provided."
+    tech_stack = ", ".join(ctx.get("tech_stack", [])) or "Undetected"
+    files = ", ".join(ctx.get("key_files", [])[:15]) or "None listed"
+    setup_steps = "\n".join(f"- {s}" for s in ctx.get("setup_steps", [])[:5]) or "None listed"
+    selected_file_path = ctx.get("selected_file_path")
+    selected_file_content = ctx.get("selected_file_content")
+    current_view = ctx.get("current_view") or "dashboard"
+
+    # Fallback response generator if Ollama is offline or model missing
+    def _evidence_fallback() -> dict[str, Any]:
+        q_lower = question.lower()
+
+        # 1. Selected file explanation intent
+        if selected_file_path and (any(w in q_lower for w in ("file", "explain", "code", "what", "detail", "role")) or "selected" in q_lower):
+            snippet_lines = (selected_file_content or "").strip().splitlines()
+            imports = [line.strip() for line in snippet_lines if any(line.strip().startswith(kw) for kw in ("import ", "from ", "const ", "export ", "require", "package ", "use "))][:4]
+            defs = [line.strip() for line in snippet_lines if any(kw in line for kw in ("def ", "class ", "function ", "interface ", "type ", "struct ", "fn "))][:4]
+
+            desc_parts = [f"Based on repository evidence for **`{selected_file_path}`**:\n"]
+            desc_parts.append(f"- **Path**: `{selected_file_path}`")
+            if imports:
+                desc_parts.append(f"- **Key Imports/Dependencies**: `{', '.join(imports[:3])}`")
+            if defs:
+                desc_parts.append(f"- **Declared Symbols/Functions**: `{', '.join(defs[:3])}`")
+            if snippet_lines:
+                desc_parts.append(f"- **Size**: {len(snippet_lines)} lines of code")
+                desc_parts.append(f"\n**Summary**: This file implements logic for `{repo_name}` as verified in the repository tree.")
+            else:
+                desc_parts.append("- Source content preview was empty or binary.")
+            desc_parts.append(f"\n*(Note: Local Ollama model `{target}` is not running. This summary is grounded directly in the file's raw content. Run `ollama pull {target}` for full AI explanation.)*")
+
+            return {
+                "answer": "\n".join(desc_parts),
+                "sources": [f"File Evidence: {selected_file_path}", f"Repository: {repo_name}"],
+                "ai_model": None,
+                "ai_available": False,
+                "fallback_used": True,
+            }
+
+        # 1b. File explanation requested but no file is selected
+        if not selected_file_path and any(phrase in q_lower for phrase in ("selected file", "explain the file", "explain this file", "selected node")):
+            return {
+                "answer": (
+                    f"No specific file is currently selected in the repository graph.\n\n"
+                    f"To inspect and explain a file:\n"
+                    f"1. Navigate to the **Repository Graph** (or view the File Tree).\n"
+                    f"2. Click any file node (such as purple code files or amber config files).\n"
+                    f"3. Click **'✨ Explain this file'** in the side drawer or ask me again — I will analyze its actual source content!"
+                ),
+                "sources": [f"Graph Navigation Guide: {repo_name}"],
+                "ai_model": None,
+                "ai_available": False,
+                "fallback_used": True,
+            }
+
+        # 2. Graph understanding intent
+        if any(w in q_lower for w in ("graph", "tree", "node", "folder", "hierarchy", "structure")):
+            ans = (
+                f"**Interactive Repository Graph Guide for {repo_name}**:\n\n"
+                f"- **Root Node**: Represents repository `{repo_name}`.\n"
+                f"- **Folders (Blue Nodes)**: Visual directory containment. Click any folder node to expand or collapse child files.\n"
+                f"- **Files (Color-Coded Nodes)**:\n"
+                f"  - **Purple**: Source code files (`.py`, `.ts`, `.js`, etc.)\n"
+                f"  - **Amber**: Manifests & configurations (`package.json`, `pyproject.toml`, etc.)\n"
+                f"  - **Cyan**: Documentation (`README.md`, docs)\n"
+                f"  - **Green**: License & community health files\n"
+                f"- **File Inspection**: Click any file node to open its details drawer, inspect its size, and view its real source code. Click 'Ask AI' to have the assistant explain that specific file."
+            )
+            return {
+                "answer": ans,
+                "sources": [f"Graph Architecture: {repo_name}"],
+                "ai_model": None,
+                "ai_available": False,
+                "fallback_used": True,
+            }
+
+        # 3. Dashboard understanding intent
+        if any(w in q_lower for w in ("dashboard", "onboard", "guide", "roadmap", "health")):
+            ans = (
+                f"**RepoReady Onboarding Dashboard Guide**:\n\n"
+                f"1. **Overview & Languages**: Core repository statistics, stars, forks, and exact language percentages.\n"
+                f"2. **Documentation Health**: Evaluates 7 community health files (README, CONTRIBUTING, LICENSE, CODE_OF_CONDUCT, SECURITY.md, Templates, CI workflows).\n"
+                f"3. **12-Section Onboarding Guide**: Grounded instructions with setup commands, test suites, and Export `.md` / `.txt` options.\n"
+                f"4. **Contributor Roadmap**: 5 progressive milestones from environment cloning to submitting your first PR.\n"
+                f"5. **Beginner Issues**: Real open GitHub issues with label filtering for 'good first issue' and 'help wanted'."
+            )
+            return {
+                "answer": ans,
+                "sources": [f"Dashboard Overview: {repo_name}"],
+                "ai_model": None,
+                "ai_available": False,
+                "fallback_used": True,
+            }
+
+        # 4. Where to start / contribute intent
+        if any(w in q_lower for w in ("start", "contribute", "begin", "first")):
+            ans = (
+                f"**Where to Begin Contributing to {repo_name}**:\n\n"
+                f"1. **Setup Environment**: Follow the verified commands:\n{setup_steps}\n"
+                f"2. **Pick an Issue**: Navigate to 'Beginner-Friendly Issues' on the dashboard and look for `#good-first-issue` or `#help-wanted` tags.\n"
+                f"3. **Explore the Code**: Switch to the **Repository Graph** view to locate the entrypoint directory and trace relevant imports.\n"
+                f"4. **Test Before PR**: Run the project's verified test suite before opening a pull request."
+            )
+            return {
+                "answer": ans,
+                "sources": [f"Contributor Guidelines: {repo_name}"],
+                "ai_model": None,
+                "ai_available": False,
+                "fallback_used": True,
+            }
+
+        # 5. Test commands
+        if any(w in q_lower for w in ("test", "pytest", "spec", "check")):
+            ans = f"Based on repository evidence for **{repo_name}**:\n- Detected stack: {tech_stack}\n- Recommended test commands: check `pytest` (Python) or `npm test` (JavaScript/TypeScript) based on manifests."
+            return {
+                "answer": ans,
+                "sources": [f"Evidence Grounding: {repo_name}"],
+                "ai_model": None,
+                "ai_available": False,
+                "fallback_used": True,
+            }
+
+        # 6. Setup commands
+        if any(w in q_lower for w in ("install", "setup", "run", "start", "build")):
+            ans = f"Based on repository evidence for **{repo_name}**:\n\n**Tech Stack**: {tech_stack}\n\n**Setup Steps**:\n{setup_steps}"
+            return {
+                "answer": ans,
+                "sources": [f"Evidence Grounding: {repo_name}"],
+                "ai_model": None,
+                "ai_available": False,
+                "fallback_used": True,
+            }
+
+        # Default fallback: clearly indicate AI unavailability and provide verified context
+        ans = (
+            f"⚠️ **Local AI Assistant is currently offline** and cannot generate an open-ended neural response for: \"{question}\"\n\n"
+            f"To enable full AI chat with local `{target}`:\n"
+            f"1. Ensure Ollama is running: `ollama serve`\n"
+            f"2. Ensure model is installed: `ollama pull {target}`\n\n"
+            f"**Verified Repository Context ({repo_name})**:\n"
+            f"- **Detected Tech Stack**: {tech_stack}\n"
+            f"- **Overview**: {overview[:300]}\n"
+            f"- **Key Files**: {files}\n"
+            f"- **Setup Steps**: {setup_steps}\n"
+            f"- **Test Suite**: Run `pytest` or check test commands in the Onboarding Guide."
+        )
+
+        return {
+            "answer": ans,
+            "sources": [f"Evidence Grounding: {repo_name}"],
+            "ai_model": None,
+            "ai_available": False,
+            "fallback_used": True,
+        }
+
+    # 1. If Ollama not running or model not installed, return honest fallback
+    if not health["running"] or not health["model_installed"]:
+        return _evidence_fallback()
+
+    model_name = health["matched_model"] or target
+
+    # 2. Build anti-injection system prompt with bounded file and view context
+    file_context_section = ""
+    if selected_file_path:
+        content_preview = (selected_file_content or "No source content loaded.")[:2500]
+        file_context_section = f"""
+### SELECTED REPOSITORY FILE:
+- Path: {selected_file_path}
+- Source Content Preview:
+```
+{content_preview}
+```
+"""
+
+    graph_context_section = ""
+    if current_view == "graph":
+        graph_context_section = """
+### CURRENT USER VIEW:
+The user is currently viewing the interactive Repository Graph (visual directory hierarchy with folder and file nodes).
+"""
+
+    history_section = ""
+    if history:
+        recent = history[-4:]
+        h_lines = [f"{m.get('role', 'user').capitalize()}: {m.get('content', '')[:200]}" for m in recent]
+        history_section = "\n### RECENT CONVERSATION HISTORY:\n" + "\n".join(h_lines) + "\n"
+
+    prompt = f"""{SYSTEM_PROMPT}
+
+You are an expert open-source onboarding mentor answering questions about repository: {repo_name}
+
+### UNTRUSTED REPOSITORY EVIDENCE:
+- Detected Stack: {tech_stack}
+- Project Overview: {overview[:1200]}
+- Key Files: {files}
+- Setup Steps:
+{setup_steps}
+{file_context_section}
+{graph_context_section}
+{history_section}
+User Question: {question}
+
+Instructions:
+1. Answer concisely, accurately, and politely based strictly on the repository evidence above.
+2. If explaining a selected file, describe what it does, its main exports/functions, and its role in the project based on the provided source content.
+3. If explaining the graph or dashboard, explain clearly how the user can navigate nodes, directories, and onboarding steps.
+4. If information is missing from the evidence, state honestly that it is not available in the repository files."""
+
+    sources_list = [f"Ollama ({model_name})", f"Repository: {repo_name}"]
+    if selected_file_path:
+        sources_list.append(f"File: {selected_file_path}")
+
+    try:
+        async with httpx.AsyncClient(timeout=CHAT_TIMEOUT) as client:
+            r = await client.post(
+                f"{health['host']}/api/generate",
+                json={
+                    "model": model_name,
+                    "prompt": prompt,
+                    "stream": False,
+                    "think": False,
+                    "options": {
+                        "num_predict": 200,
+                        "temperature": 0.4,
+                    },
+                },
+            )
+            if r.status_code == 200:
+                data = r.json()
+                resp_text = (data.get("response") or data.get("thinking") or "").strip()
+                if resp_text:
+                    return {
+                        "answer": resp_text,
+                        "sources": sources_list,
+                        "ai_model": model_name,
+                        "ai_available": True,
+                        "fallback_used": False,
+                    }
+    except Exception:
+        pass
+
+    return _evidence_fallback()
+
 

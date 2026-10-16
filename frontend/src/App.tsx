@@ -13,6 +13,11 @@ import OnboardingGuide from './components/OnboardingGuide';
 import IssueList from './components/IssueList';
 import SetupChecklist from './components/SetupChecklist';
 import FileTree from './components/FileTree';
+import DocStatusChecker from './components/DocStatusChecker';
+import ContributorRoadmap from './components/ContributorRoadmap';
+import RepoChat from './components/RepoChat';
+import RepoGraph from './components/RepoGraph';
+import FloatingAiChat, { type SelectedFileContext } from './components/FloatingAiChat';
 
 type AppState =
   | { kind: 'idle' }
@@ -24,6 +29,10 @@ export default function App() {
   const [state, setState] = useState<AppState>({ kind: 'idle' });
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [showReadme, setShowReadme] = useState(false);
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'graph'>('dashboard');
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [selectedFileContext, setSelectedFileContext] = useState<SelectedFileContext | null>(null);
+  const [pendingChatQuestion, setPendingChatQuestion] = useState<string | null>(null);
 
   // Check backend health on mount
   useEffect(() => {
@@ -43,6 +52,9 @@ export default function App() {
   const handleSearch = useCallback(async (owner: string, repo: string) => {
     setState({ kind: 'loading', owner, repo });
     setShowReadme(false);
+    setActiveTab('dashboard');
+    setSelectedFileContext(null);
+    setPendingChatQuestion(null);
     try {
       const repoUrl = `https://github.com/${owner}/${repo}`;
       const data = await analyzeRepository(repoUrl);
@@ -239,106 +251,255 @@ export default function App() {
             </div>
           )}
 
-          <div className="section-grid">
-            {/* Left column: Overview + File Tree + Sources */}
-            <div>
-              <RepoOverview
-                repo={state.data.repository}
-                languages={state.data.languages || { languages: {}, percentages: {} }}
-                contributors={state.data.contributors || []}
-              />
+          {/* View Mode Tabs */}
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 'var(--space-3)',
+              marginBottom: 'var(--space-6)',
+              borderBottom: '1px solid var(--border-subtle)',
+              paddingBottom: 'var(--space-3)',
+              flexWrap: 'wrap',
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => setActiveTab('dashboard')}
+              style={{
+                background: activeTab === 'dashboard' ? 'var(--bg-card)' : 'transparent',
+                color: activeTab === 'dashboard' ? 'var(--accent-green)' : 'var(--text-muted)',
+                border: `1.5px solid ${activeTab === 'dashboard' ? 'var(--border-focus)' : 'transparent'}`,
+                boxShadow: activeTab === 'dashboard' ? 'var(--shadow-sm)' : 'none',
+                padding: '8px 16px',
+                borderRadius: 'var(--radius-md)',
+                fontWeight: 600,
+                fontSize: 'var(--text-sm)',
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                transition: 'all 150ms ease',
+              }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+                <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+              </svg>
+              Onboarding Dashboard
+            </button>
 
+            <button
+              type="button"
+              onClick={() => setActiveTab('graph')}
+              style={{
+                background: activeTab === 'graph' ? 'var(--bg-card)' : 'transparent',
+                color: activeTab === 'graph' ? 'var(--accent-green)' : 'var(--text-muted)',
+                border: `1.5px solid ${activeTab === 'graph' ? 'var(--border-focus)' : 'transparent'}`,
+                boxShadow: activeTab === 'graph' ? 'var(--shadow-sm)' : 'none',
+                padding: '8px 16px',
+                borderRadius: 'var(--radius-md)',
+                fontWeight: 600,
+                fontSize: 'var(--text-sm)',
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                transition: 'all 150ms ease',
+              }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="18" cy="5" r="3" />
+                <circle cx="6" cy="12" r="3" />
+                <circle cx="18" cy="19" r="3" />
+                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+                <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+              </svg>
+              Repository Graph
               {state.data.file_tree && state.data.file_tree.length > 0 && (
+                <span
+                  style={{
+                    background: 'rgba(22, 163, 74, 0.15)',
+                    color: 'var(--accent-green)',
+                    padding: '1px 6px',
+                    borderRadius: 'var(--radius-sm)',
+                    fontSize: '10px',
+                    fontWeight: 700,
+                  }}
+                >
+                  {state.data.file_tree.length}
+                </span>
+              )}
+            </button>
+          </div>
+
+          {activeTab === 'graph' ? (
+            <div className="fade-in">
+              <RepoGraph
+                files={state.data.file_tree || []}
+                repoName={state.data.repository.full_name}
+                repoUrl={state.data.repository.html_url}
+                defaultBranch={state.data.repository.default_branch}
+                isEmpty={state.data.repository.is_empty}
+                onAskAi={(file) => {
+                  setSelectedFileContext(file);
+                  setIsChatOpen(true);
+                  setPendingChatQuestion(`Explain the file ${file.name}`);
+                }}
+                onFileSelected={(file) => setSelectedFileContext(file)}
+              />
+            </div>
+          ) : (
+            <div className="section-grid">
+              {/* Left column: Overview + Doc Health + File Tree + Sources */}
+              <div>
+                <RepoOverview
+                  repo={state.data.repository}
+                  languages={state.data.languages || { languages: {}, percentages: {} }}
+                  contributors={state.data.contributors || []}
+                />
+
+                {state.data.documentation_status && (
+                  <div style={{ marginTop: 'var(--space-6)' }}>
+                    <DocStatusChecker
+                      status={state.data.documentation_status}
+                      repoUrl={state.data.repository.html_url}
+                      defaultBranch={state.data.repository.default_branch}
+                    />
+                  </div>
+                )}
+
+                {state.data.file_tree && state.data.file_tree.length > 0 && (
+                  <div style={{ marginTop: 'var(--space-6)' }}>
+                    <FileTree
+                      files={state.data.file_tree}
+                      repoUrl={state.data.repository.html_url}
+                      defaultBranch={state.data.repository.default_branch}
+                      onOpenGraph={() => setActiveTab('graph')}
+                    />
+                  </div>
+                )}
+
+                {/* Evidence Sources */}
+                {state.data.sources && state.data.sources.length > 0 && (
+                  <div className="card fade-in fade-in-delay-3" style={{ marginTop: 'var(--space-6)' }}>
+                    <h3 className="card-title" style={{ fontSize: 'var(--text-sm)' }}>
+                      Evidence Sources
+                    </h3>
+                    <ul style={{ margin: 0, paddingLeft: 'var(--space-4)', color: 'var(--text-muted)', fontSize: 'var(--text-xs)' }}>
+                      {state.data.sources.map((s, idx) => (
+                        <li key={idx} style={{ marginBottom: '4px' }}>
+                          <code>{s}</code>
+                        </li>
+                      ))}
+                    </ul>
+                    <p style={{ marginTop: 'var(--space-2)', fontSize: '11px', color: 'var(--text-muted)' }}>
+                      Generated at: {state.data.generated_at}
+                    </p>
+                  </div>
+                )}
+
+                {/* README (collapsible) */}
+                {state.data.readme_html && (
+                  <div className="card fade-in fade-in-delay-5" style={{ marginTop: 'var(--space-6)' }}>
+                    <h2 className="card-title" style={{ cursor: 'pointer' }} onClick={() => setShowReadme(!showReadme)}>
+                      <svg className="card-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                        <polyline points="14 2 14 8 20 8" />
+                        <line x1="16" y1="13" x2="8" y2="13" />
+                        <line x1="16" y1="17" x2="8" y2="17" />
+                        <polyline points="10 9 9 9 8 9" />
+                      </svg>
+                      README.md
+                      <svg
+                        width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                        strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                        style={{ marginLeft: 'auto', transition: 'transform 200ms', transform: showReadme ? 'rotate(180deg)' : 'rotate(0)' }}
+                      >
+                        <polyline points="6 9 12 15 18 9" />
+                      </svg>
+                    </h2>
+                    {showReadme && (
+                      <div
+                        className="readme-container"
+                        dangerouslySetInnerHTML={{ __html: state.data.readme_html }}
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Right column: Guide + Contributor Roadmap + AI Chat + Issues + Checklist */}
+              <div>
+                <OnboardingGuide
+                  guide={state.data.guide || ({
+                    summary: state.data.overview,
+                    tech_stack: state.data.tech_stack,
+                    setup_steps: state.data.setup_steps,
+                    contribution_tips: state.data.contribution_tips,
+                    key_files: state.data.key_files,
+                    ai_enhanced: false,
+                    ai_model: null,
+                    prerequisites: [],
+                    run_commands: [],
+                    test_commands: [],
+                    suggested_first_contribution: null,
+                    common_problems: [],
+                    unavailable_info: [],
+                    sections: state.data.sections,
+                    full_guide_markdown: state.data.full_guide_markdown,
+                    ai_status: state.data.ai_status,
+                  } as GuideType)}
+                />
+
+                {state.data.contributor_roadmap && state.data.contributor_roadmap.length > 0 && (
+                  <div style={{ marginTop: 'var(--space-6)' }}>
+                    <ContributorRoadmap phases={state.data.contributor_roadmap} />
+                  </div>
+                )}
+
                 <div style={{ marginTop: 'var(--space-6)' }}>
-                  <FileTree
-                    files={state.data.file_tree}
+                  <RepoChat
+                    repoName={state.data.repository.full_name}
                     repoUrl={state.data.repository.html_url}
-                    defaultBranch={state.data.repository.default_branch}
+                    overview={state.data.overview}
+                    techStack={state.data.tech_stack}
+                    files={state.data.key_files}
+                    setupSteps={state.data.setup_steps}
+                    aiAvailable={health?.ollama_available ?? false}
+                    targetModel={health?.target_ai_model || 'qwen3:4b'}
                   />
                 </div>
-              )}
 
-              {/* Evidence Sources */}
-              {state.data.sources && state.data.sources.length > 0 && (
-                <div className="card fade-in fade-in-delay-3" style={{ marginTop: 'var(--space-6)' }}>
-                  <h3 className="card-title" style={{ fontSize: 'var(--text-sm)' }}>
-                    Evidence Sources
-                  </h3>
-                  <ul style={{ margin: 0, paddingLeft: 'var(--space-4)', color: 'var(--text-muted)', fontSize: 'var(--text-xs)' }}>
-                    {state.data.sources.map((s, idx) => (
-                      <li key={idx} style={{ marginBottom: '4px' }}>
-                        <code>{s}</code>
-                      </li>
-                    ))}
-                  </ul>
-                  <p style={{ marginTop: 'var(--space-2)', fontSize: '11px', color: 'var(--text-muted)' }}>
-                    Generated at: {state.data.generated_at}
-                  </p>
+                <div style={{ marginTop: 'var(--space-6)' }}>
+                  <IssueList issues={state.data.recommended_issues || []} />
                 </div>
-              )}
 
-              {/* README (collapsible) */}
-              {state.data.readme_html && (
-                <div className="card fade-in fade-in-delay-5" style={{ marginTop: 'var(--space-6)' }}>
-                  <h2 className="card-title" style={{ cursor: 'pointer' }} onClick={() => setShowReadme(!showReadme)}>
-                    <svg className="card-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                      <polyline points="14 2 14 8 20 8" />
-                      <line x1="16" y1="13" x2="8" y2="13" />
-                      <line x1="16" y1="17" x2="8" y2="17" />
-                      <polyline points="10 9 9 9 8 9" />
-                    </svg>
-                    README.md
-                    <svg
-                      width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-                      style={{ marginLeft: 'auto', transition: 'transform 200ms', transform: showReadme ? 'rotate(180deg)' : 'rotate(0)' }}
-                    >
-                      <polyline points="6 9 12 15 18 9" />
-                    </svg>
-                  </h2>
-                  {showReadme && (
-                    <div
-                      className="readme-container"
-                      dangerouslySetInnerHTML={{ __html: state.data.readme_html }}
-                    />
-                  )}
+                <div style={{ marginTop: 'var(--space-6)' }}>
+                  <SetupChecklist repoName={state.data.repository.full_name} />
                 </div>
-              )}
-            </div>
-
-            {/* Right column: Guide + Issues + Checklist */}
-            <div>
-              <OnboardingGuide
-                guide={state.data.guide || ({
-                  summary: state.data.overview,
-                  tech_stack: state.data.tech_stack,
-                  setup_steps: state.data.setup_steps,
-                  contribution_tips: state.data.contribution_tips,
-                  key_files: state.data.key_files,
-                  ai_enhanced: false,
-                  ai_model: null,
-                  prerequisites: [],
-                  run_commands: [],
-                  test_commands: [],
-                  suggested_first_contribution: null,
-                  common_problems: [],
-                  unavailable_info: [],
-                  sections: state.data.sections,
-                  full_guide_markdown: state.data.full_guide_markdown,
-                  ai_status: state.data.ai_status,
-                } as GuideType)}
-              />
-
-              <div style={{ marginTop: 'var(--space-6)' }}>
-                <IssueList issues={state.data.recommended_issues || []} />
-              </div>
-
-              <div style={{ marginTop: 'var(--space-6)' }}>
-                <SetupChecklist repoName={state.data.repository.full_name} />
               </div>
             </div>
-          </div>
+          )}
+
+          {/* Floating AI Chat Assistant */}
+          <FloatingAiChat
+            repoName={state.data.repository.full_name}
+            repoUrl={state.data.repository.html_url}
+            currentView={activeTab}
+            overview={state.data.overview}
+            techStack={state.data.tech_stack}
+            files={state.data.key_files}
+            setupSteps={state.data.setup_steps}
+            targetModel={health?.target_ai_model || 'qwen3:4b'}
+            ollamaAvailable={Boolean(health?.ollama_available && health?.ollama_model_installed)}
+            selectedFile={selectedFileContext}
+            onClearSelectedFile={() => setSelectedFileContext(null)}
+            isOpen={isChatOpen}
+            onToggleOpen={() => setIsChatOpen(!isChatOpen)}
+            pendingQuestion={pendingChatQuestion}
+            onClearPendingQuestion={() => setPendingChatQuestion(null)}
+          />
         </div>
       )}
 
