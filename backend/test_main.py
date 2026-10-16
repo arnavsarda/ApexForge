@@ -18,10 +18,14 @@ import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import httpx
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 # Ensure backend directory is in sys.path
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
 
 from main import app
 from config import (
@@ -34,6 +38,7 @@ from config import (
 from validator import validate_and_parse_github_url
 from models import RepoMeta, LanguageBreakdown, Issue, Contributor, FileTreeEntry
 from summarizer import generate_onboarding_guide, _detect_tech_stack, _infer_setup_steps
+from ollama_client import check_ollama_health, generate_ai_guide
 
 
 @pytest.fixture
@@ -366,7 +371,6 @@ def test_analyze_response_schema_stability(client):
 
 def test_404_repository_not_found(client):
     """POST /api/analyze must return 404 with clear message when repository is not found or private."""
-    from fastapi import HTTPException
     with patch("main.fetch_all", side_effect=HTTPException(status_code=404, detail="Repository not found or is private")):
         response = client.post(
             "/api/analyze",
@@ -378,7 +382,6 @@ def test_404_repository_not_found(client):
 
 def test_429_rate_limit_exceeded(client):
     """POST /api/analyze must return 429 when GitHub rate limit is exceeded."""
-    from fastapi import HTTPException
     with patch("main.fetch_all", side_effect=HTTPException(status_code=429, detail="GitHub API rate limit exceeded")):
         response = client.post(
             "/api/analyze",
@@ -391,7 +394,6 @@ def test_429_rate_limit_exceeded(client):
 @pytest.mark.anyio
 async def test_fetch_repo_response_parsing_offline():
     """Verify GitHub API repository payload parsing into RepoMeta without network."""
-    import httpx
     from github_client import fetch_repo
 
     raw_gh_payload = {
@@ -626,7 +628,6 @@ def test_url_rejects_localhost_and_private_ips():
 @pytest.mark.anyio
 async def test_fetch_issues_strictly_excludes_pull_requests():
     """fetch_issues must exclude items containing the pull_request field."""
-    import httpx
     from github_client import fetch_issues
 
     mock_github_items = [
@@ -732,8 +733,226 @@ def test_genuinely_empty_repo_detection(client):
 
 def test_auth_failure_401_handling(client):
     """GitHub 401 Bad Credentials must return 401 with clear message."""
-    from fastapi import HTTPException
     with patch("main.fetch_all", side_effect=HTTPException(status_code=401, detail="GitHub authentication failed (401 Bad Credentials). Please verify GITHUB_TOKEN in .env.")):
         response = client.post("/api/analyze", json={"repository_url": "https://github.com/fastapi/fastapi"})
         assert response.status_code == 401
         assert "bad credentials" in response.json()["detail"].lower()
+
+
+# ── 12. Local Ollama & Qwen3 Guide Generation Tests ─────────────────────────
+
+@pytest.mark.anyio
+async def test_ollama_health_check_offline():
+    """When Ollama cannot be reached, report honest running=False without hanging."""
+    with patch("httpx.AsyncClient.get", side_effect=httpx.ConnectError("Connection refused")):
+        status = await check_ollama_health()
+        assert status["running"] is False
+        assert status["model_installed"] is False
+        assert status["error"] is not None
+
+
+@pytest.mark.anyio
+async def test_ollama_health_check_online_model_missing():
+    """When Ollama is running but qwen3:4b is not installed, report honest status."""
+    mock_resp = httpx.Response(200, json={"models": [{"name": "llama3:latest"}]}, request=httpx.Request("GET", "http://localhost:11434/api/tags"))
+    with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_resp)):
+        status = await check_ollama_health()
+        assert status["running"] is True
+        assert status["model_installed"] is False
+        assert status["target_model"] == "qwen3:4b"
+
+
+@pytest.mark.anyio
+async def test_ollama_health_check_online_model_present():
+    """When Ollama has qwen3:4b installed, report model_installed=True."""
+    mock_resp = httpx.Response(200, json={"models": [{"name": "qwen3:4b"}, {"name": "other:latest"}]}, request=httpx.Request("GET", "http://localhost:11434/api/tags"))
+    with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=mock_resp)):
+        status = await check_ollama_health()
+        assert status["running"] is True
+        assert status["model_installed"] is True
+        assert status["matched_model"] == "qwen3:4b"
+
+
+@pytest.mark.anyio
+async def test_generate_ai_guide_with_mocked_qwen3():
+    """When Qwen3 generates valid guide output, verify synthesis and ai_enhanced=True."""
+    meta = RepoMeta(
+        owner="aiuser",
+        name="airepo",
+        full_name="aiuser/airepo",
+        html_url="https://github.com/aiuser/airepo",
+        stars=10,
+        forks=2,
+        open_issues=1,
+        default_branch="main",
+        language="Python",
+        created_at="2024-01-01T00:00:00Z",
+        updated_at="2024-01-02T00:00:00Z",
+    )
+    languages = LanguageBreakdown(languages={"Python": 1000}, percentages={"Python": 100.0})
+    file_tree = [FileTreeEntry(path="main.py", type="blob", size=100)]
+    issues = [Issue(number=1, title="Starter bug", html_url="https://github.com/aiuser/airepo/issues/1", labels=["good first issue"], created_at="2024-01-01T00:00:00Z")]
+
+    base_guide = generate_onboarding_guide(
+        meta=meta,
+        languages=languages,
+        file_tree=file_tree,
+        readme_raw="# AI Repo\nSample",
+    )
+
+    mock_health = {
+        "running": True,
+        "host": "http://localhost:11434",
+        "target_model": "qwen3:4b",
+        "model_installed": True,
+        "matched_model": "qwen3:4b",
+        "installed_models": ["qwen3:4b"],
+        "error": None,
+    }
+
+    qwen3_text = "This repository implements an AI data processing pipeline with Python."
+    mock_post_resp = httpx.Response(200, json={"response": qwen3_text}, request=httpx.Request("POST", "http://localhost:11434/api/generate"))
+
+    with patch("ollama_client.check_ollama_health", new=AsyncMock(return_value=mock_health)), \
+         patch("httpx.AsyncClient.post", new=AsyncMock(return_value=mock_post_resp)):
+        guide, ai_status = await generate_ai_guide(
+            repo_name="aiuser/airepo",
+            description="AI Repo",
+            readme_snippet="# AI Repo\nSample",
+            tech_stack=["Python"],
+            file_tree_paths=["main.py"],
+            config_files={},
+            contributing_raw=None,
+            issues=issues,
+            base_guide=base_guide,
+        )
+
+        assert guide.ai_enhanced is True
+        assert guide.ai_model == "qwen3:4b"
+        assert ai_status["fallback_used"] is False
+        assert "pipeline" in guide.summary
+        assert len(guide.sections) == 12
+
+
+@pytest.mark.anyio
+async def test_generate_ai_guide_honest_fallback_when_model_missing():
+    """When Qwen3 model is missing, return honest fallback and never claim it was AI-generated."""
+    meta = RepoMeta(
+        owner="fallbackuser",
+        name="fallbackrepo",
+        full_name="fallbackuser/fallbackrepo",
+        html_url="https://github.com/fallbackuser/fallbackrepo",
+        stars=5,
+        forks=1,
+        open_issues=0,
+        default_branch="main",
+        language="Python",
+        created_at="2024-01-01T00:00:00Z",
+        updated_at="2024-01-02T00:00:00Z",
+    )
+    languages = LanguageBreakdown(languages={"Python": 500}, percentages={"Python": 100.0})
+    file_tree = [FileTreeEntry(path="app.py", type="blob", size=100)]
+
+    base_guide = generate_onboarding_guide(
+        meta=meta,
+        languages=languages,
+        file_tree=file_tree,
+        readme_raw="# Fallback",
+    )
+
+    mock_health = {
+        "running": True,
+        "host": "http://localhost:11434",
+        "target_model": "qwen3:4b",
+        "model_installed": False,
+        "matched_model": None,
+        "installed_models": [],
+        "error": None,
+    }
+
+    with patch("ollama_client.check_ollama_health", new=AsyncMock(return_value=mock_health)):
+        guide, ai_status = await generate_ai_guide(
+            repo_name="fallbackuser/fallbackrepo",
+            description="Fallback Repo",
+            readme_snippet="# Fallback",
+            tech_stack=["Python"],
+            file_tree_paths=["app.py"],
+            config_files={},
+            contributing_raw=None,
+            issues=[],
+            base_guide=base_guide,
+        )
+
+        assert guide.ai_enhanced is False
+        assert ai_status["fallback_used"] is True
+        assert ai_status["model_installed"] is False
+        assert "not installed" in ai_status["reason"].lower()
+        assert len(guide.sections) == 12
+
+
+@pytest.mark.anyio
+async def test_generate_ai_guide_timeout_handling():
+    """When Ollama call times out, gracefully fall back to rule engine without hanging."""
+    meta = RepoMeta(
+        owner="timeoutuser",
+        name="timeoutrepo",
+        full_name="timeoutuser/timeoutrepo",
+        html_url="https://github.com/timeoutuser/timeoutrepo",
+        stars=5,
+        forks=1,
+        open_issues=0,
+        default_branch="main",
+        language="TypeScript",
+        created_at="2024-01-01T00:00:00Z",
+        updated_at="2024-01-02T00:00:00Z",
+    )
+    languages = LanguageBreakdown(languages={"TypeScript": 500}, percentages={"TypeScript": 100.0})
+    file_tree = [FileTreeEntry(path="package.json", type="blob", size=50)]
+
+    base_guide = generate_onboarding_guide(
+        meta=meta,
+        languages=languages,
+        file_tree=file_tree,
+        readme_raw="Slow repo",
+    )
+
+    mock_health = {
+        "running": True,
+        "host": "http://localhost:11434",
+        "target_model": "qwen3:4b",
+        "model_installed": True,
+        "matched_model": "qwen3:4b",
+        "installed_models": ["qwen3:4b"],
+        "error": None,
+    }
+
+    with patch("ollama_client.check_ollama_health", new=AsyncMock(return_value=mock_health)), \
+         patch("httpx.AsyncClient.post", side_effect=httpx.TimeoutException("Generation timed out")):
+        guide, ai_status = await generate_ai_guide(
+            repo_name="timeoutuser/timeoutrepo",
+            description="Timeout",
+            readme_snippet="Slow repo",
+            tech_stack=["TypeScript"],
+            file_tree_paths=["package.json"],
+            config_files={"package.json": '{"scripts": {"dev": "vite"}}'},
+            contributing_raw=None,
+            issues=[],
+            base_guide=base_guide,
+        )
+
+        assert guide.ai_enhanced is False
+        assert ai_status["fallback_used"] is True
+        assert "timed out" in ai_status["reason"].lower() or "failed" in ai_status["reason"].lower()
+        assert len(guide.sections) == 12
+
+
+def test_untrusted_repository_prompt_injection_safety():
+    """Verify system prompt instructs model to treat repository content as untrusted evidence."""
+    from ollama_client import SYSTEM_PROMPT
+
+    prompt_lower = SYSTEM_PROMPT.lower()
+    assert "untrusted" in prompt_lower
+    assert "instructions" in prompt_lower
+    assert "evidence" in prompt_lower
+
+

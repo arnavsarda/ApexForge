@@ -30,10 +30,12 @@ from validator import validate_and_parse_github_url
 from github_client import fetch_all
 from summarizer import generate_onboarding_guide
 from ollama_client import (
+    check_ollama_health,
+    generate_ai_guide,
+    test_ai_inference,
     enhance_guide,
     is_available as ollama_available,
-    test_ai_inference,
-    TARGET_MODEL,
+    get_ollama_model,
 )
 
 # Load project .env at startup
@@ -45,13 +47,14 @@ async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle."""
     load_project_env()
     token_ok = is_token_configured()
-    ollama_ok = await ollama_available()
+    ollama_stat = await check_ollama_health()
     diag = get_token_diagnostics()
 
     print("[*] RepoReady backend starting")
     print(f"    GitHub token: {'[OK] configured (' + str(diag.get('rate_limit_tier')) + ')' if token_ok else '[!!] not configured (60 req/hr limit)'}")
     print(f"    Env file:     {diag.get('env_file_path') or 'not found'}")
-    print(f"    Ollama:       {'[OK] available' if ollama_ok else '[--] not available (using rule-based guides)'}")
+    print(f"    Ollama:       {'[OK] running' if ollama_stat['running'] else '[--] not running (rule-based fallback active)'}")
+    print(f"    Ollama model: {'[OK] ' + ollama_stat['target_model'] + ' available' if ollama_stat['model_installed'] else '[--] ' + ollama_stat['target_model'] + ' not pulled'}")
     yield
     print("[*] RepoReady backend shutting down")
 
@@ -107,28 +110,33 @@ async def health():
     """Health check endpoint reporting safe diagnostics without exposing secrets."""
     load_project_env()
     diag = get_token_diagnostics()
+    ollama_stat = await check_ollama_health()
     return {
         "status": "ok",
         "app": "RepoReady",
         "version": "0.1.0",
         "github_token_set": diag["github_token_configured"],
         "diagnostics": diag,
-        "ollama_available": await ollama_available(),
-        "target_ai_model": TARGET_MODEL,
+        "ollama_available": ollama_stat["running"] and ollama_stat["model_installed"],
+        "ollama_running": ollama_stat["running"],
+        "target_ai_model": ollama_stat["target_model"],
+        "ollama_model_installed": ollama_stat["model_installed"],
+        "installed_ai_models": ollama_stat["installed_models"],
     }
 
 
 @app.post("/api/ai-test", response_model=AiTestResponse)
 async def ai_test(req: AiTestRequest | None = None):
-    """Test local Ollama AI model inference (target model: qwen3:4b)."""
+    """Test local Ollama AI model inference (target model: qwen3:4b) safely."""
     prompt = req.prompt if req else "Explain what an open source contributor does in 2 sentences."
     model = req.model if req else None
     result = await test_ai_inference(prompt=prompt, model=model)
     return AiTestResponse(
         status=result.get("status", "error"),
-        target_model=result.get("target_model", TARGET_MODEL),
+        target_model=result.get("target_model", get_ollama_model()),
         model_used=result.get("model_used"),
         available=result.get("available", False),
+        model_installed=result.get("model_installed", False),
         response=result.get("response"),
         error=result.get("error"),
     )
@@ -169,28 +177,32 @@ async def _analyze_repository(owner: str, repo: str) -> AnalysisResponse:
     config_files = data.get("config_files", {})
     contributing_raw = data.get("contributing_raw")
     contributing_path = data.get("contributing_path") or "CONTRIBUTING.md"
+    issues = data.get("beginner_issues", [])
 
-    # Generate the evidence-based onboarding guide
-    guide = generate_onboarding_guide(
+    # 1. Deterministic evidence-based guide with all 12 sections
+    base_guide = generate_onboarding_guide(
         meta=meta,
         languages=languages,
         file_tree=file_tree,
         readme_raw=readme_raw,
         config_files=config_files,
         contributing_raw=contributing_raw,
+        issues=issues,
     )
 
-    # Optional local Ollama enhancement
-    enhanced = await enhance_guide(
+    # 2. Local Qwen3 AI guide generation with honest fallback
+    file_paths = [f.path for f in file_tree]
+    final_guide, ai_status = await generate_ai_guide(
         repo_name=meta.full_name,
         description=meta.description,
         readme_snippet=readme_raw,
-        tech_stack=guide.tech_stack,
-        existing_summary=guide.summary,
+        tech_stack=base_guide.tech_stack,
+        file_tree_paths=file_paths,
+        config_files=config_files,
+        contributing_raw=contributing_raw,
+        issues=issues,
+        base_guide=base_guide,
     )
-    if enhanced:
-        guide.summary = enhanced
-        guide.ai_enhanced = True
 
     # Assemble evidence sources
     sources = [
@@ -219,19 +231,21 @@ async def _analyze_repository(owner: str, repo: str) -> AnalysisResponse:
         warnings.append("No README found. Setup steps are derived from detected project configuration files.")
     if meta.license is None:
         warnings.append("No open-source license detected in repository metadata.")
-    if not data["beginner_issues"]:
+    if not issues:
         warnings.append("No open issues found or no beginner-friendly labels detected.")
+    if ai_status.get("fallback_used"):
+        warnings.append(f"AI Guide Synthesis: {ai_status.get('reason', 'Using rule-based evidence engine')}.")
 
     now_iso = datetime.now(timezone.utc).isoformat()
 
     return AnalysisResponse(
         repository=meta,
-        overview=guide.summary,
-        tech_stack=guide.tech_stack,
-        setup_steps=guide.setup_steps,
-        key_files=guide.key_files,
-        contribution_tips=guide.contribution_tips,
-        recommended_issues=data["beginner_issues"],
+        overview=final_guide.summary,
+        tech_stack=final_guide.tech_stack,
+        setup_steps=final_guide.setup_steps,
+        key_files=final_guide.key_files,
+        contribution_tips=final_guide.contribution_tips,
+        recommended_issues=issues,
         sources=sources,
         warnings=warnings,
         errors=[],
@@ -246,7 +260,12 @@ async def _analyze_repository(owner: str, repo: str) -> AnalysisResponse:
         readme_content=readme_raw,
         contributing_content=contributing_raw,
         rate_limit_remaining=data["rate_limit_remaining"],
+        guide=final_guide,
+        sections=final_guide.sections,
+        full_guide_markdown=final_guide.full_guide_markdown,
+        ai_status=ai_status,
     )
+
 
 
 @app.post("/api/analyze-repo", response_model=AnalysisResponse)

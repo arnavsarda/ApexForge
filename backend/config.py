@@ -99,3 +99,16 @@ def get_github_headers() -> dict[str, str]:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return headers
+
+
+def get_ollama_host() -> str:
+    """Return configured Ollama host URL, defaulting to local daemon at http://localhost:11434."""
+    load_project_env()
+    return os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+
+
+def get_ollama_model() -> str:
+    """Return target local Ollama model, strictly defaulting to qwen3:4b."""
+    load_project_env()
+    return os.getenv("OLLAMA_MODEL", "qwen3:4b").strip()
+

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from pydantic import BaseModel, Field
 
 
@@ -93,7 +94,7 @@ class FileTreeEntry(BaseModel):
 
 
 class OnboardingGuide(BaseModel):
-    """The generated onboarding guide content."""
+    """The generated onboarding guide content with all 12 evidence-based sections."""
 
     summary: str
     tech_stack: list[str]
@@ -101,6 +102,16 @@ class OnboardingGuide(BaseModel):
     contribution_tips: list[str]
     key_files: list[str]
     ai_enhanced: bool = False
+    ai_model: str | None = None
+    prerequisites: list[str] = []
+    run_commands: list[str] = []
+    test_commands: list[str] = []
+    suggested_first_contribution: str | None = None
+    common_problems: list[str] = []
+    unavailable_info: list[str] = []
+    sections: dict[str, str] = {}
+    full_guide_markdown: str | None = None
+    ai_status: dict[str, Any] = {}
 
 
 class AnalysisResponse(BaseModel):
@@ -130,6 +141,12 @@ class AnalysisResponse(BaseModel):
     contributing_content: str | None = None
     rate_limit_remaining: int | None = None
 
+    # Prompt 5: Rich 12-section guide and honest AI status
+    guide: OnboardingGuide | None = None
+    sections: dict[str, str] = {}
+    full_guide_markdown: str | None = None
+    ai_status: dict[str, Any] = {}
+
 
 class OnboardResponse(BaseModel):
     """Legacy response schema for /api/onboard/{owner}/{repo} compatibility."""
@@ -158,5 +175,7 @@ class AiTestResponse(BaseModel):
     target_model: str
     model_used: str | None = None
     available: bool
+    model_installed: bool = False
     response: str | None = None
     error: str | None = None
+

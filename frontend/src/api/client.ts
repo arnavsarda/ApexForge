@@ -55,6 +55,23 @@ export interface OnboardingGuide {
   contribution_tips: string[];
   key_files: string[];
   ai_enhanced: boolean;
+  ai_model?: string | null;
+  prerequisites?: string[];
+  run_commands?: string[];
+  test_commands?: string[];
+  suggested_first_contribution?: string | null;
+  common_problems?: string[];
+  unavailable_info?: string[];
+  sections?: Record<string, string>;
+  full_guide_markdown?: string | null;
+  ai_status?: {
+    available: boolean;
+    model_installed?: boolean;
+    model_used?: string | null;
+    target_model?: string;
+    fallback_used?: boolean;
+    reason?: string;
+  };
 }
 
 export interface AnalysisResponse {
@@ -67,12 +84,29 @@ export interface AnalysisResponse {
   recommended_issues: Issue[];
   sources: string[];
   warnings: string[];
+  errors?: string[];
   generated_at: string;
   languages?: LanguageBreakdown;
   contributors?: Contributor[];
   file_tree?: FileTreeEntry[];
+  selected_files?: Record<string, string>;
+  has_readme?: boolean;
+  has_contributing?: boolean;
   readme_html?: string | null;
+  readme_content?: string | null;
+  contributing_content?: string | null;
   rate_limit_remaining?: number | null;
+  guide?: OnboardingGuide;
+  sections?: Record<string, string>;
+  full_guide_markdown?: string | null;
+  ai_status?: {
+    available: boolean;
+    model_installed?: boolean;
+    model_used?: string | null;
+    target_model?: string;
+    fallback_used?: boolean;
+    reason?: string;
+  };
 }
 
 export interface OnboardResponse {
@@ -92,12 +126,35 @@ export interface HealthResponse {
   version?: string;
   github_token_set: boolean;
   ollama_available: boolean;
+  ollama_running?: boolean;
+  target_ai_model?: string;
+  ollama_model_installed?: boolean;
+  installed_ai_models?: string[];
   diagnostics?: {
     github_token_configured: boolean;
     rate_limit_tier: string;
     env_file_detected: boolean;
     env_file_path?: string | null;
   };
+}
+
+export interface AiTestResponse {
+  status: string;
+  target_model: string;
+  model_used?: string | null;
+  available: boolean;
+  model_installed: boolean;
+  response?: string | null;
+  error?: string | null;
+}
+
+export async function testAi(prompt?: string, model?: string): Promise<AiTestResponse> {
+  const res = await fetch('/api/ai-test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, model }),
+  });
+  return res.json();
 }
 
 export interface ApiError {

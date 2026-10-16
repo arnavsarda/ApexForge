@@ -187,14 +187,24 @@ export default function App() {
             {/* Right column: Guide + Issues + Checklist */}
             <div>
               <OnboardingGuide
-                guide={{
+                guide={state.data.guide || ({
                   summary: state.data.overview,
                   tech_stack: state.data.tech_stack,
                   setup_steps: state.data.setup_steps,
                   contribution_tips: state.data.contribution_tips,
                   key_files: state.data.key_files,
-                  ai_enhanced: Boolean(health?.ollama_available),
-                } as GuideType}
+                  ai_enhanced: false,
+                  ai_model: null,
+                  prerequisites: [],
+                  run_commands: [],
+                  test_commands: [],
+                  suggested_first_contribution: null,
+                  common_problems: [],
+                  unavailable_info: [],
+                  sections: state.data.sections,
+                  full_guide_markdown: state.data.full_guide_markdown,
+                  ai_status: state.data.ai_status,
+                } as GuideType)}
               />
 
               <div style={{ marginTop: 'var(--space-6)' }}>
@@ -209,7 +219,7 @@ export default function App() {
 
           {/* Status Bar */}
           <div className="status-bar">
-            {state.data.rate_limit_remaining !== null && (
+            {typeof state.data.rate_limit_remaining === 'number' && (
               <div className="status-item">
                 <span className={`status-dot ${
                   state.data.rate_limit_remaining > 100 ? 'green' :
@@ -225,8 +235,20 @@ export default function App() {
                   Token: {health.github_token_set ? 'Configured (5,000 req/hr)' : 'Not set (60 req/hr)'}
                 </div>
                 <div className="status-item">
-                  <span className={`status-dot ${health.ollama_available ? 'green' : 'amber'}`} />
-                  AI: {health.ollama_available ? 'Ollama' : 'Evidence-based'}
+                  <span className={`status-dot ${
+                    health.ollama_available && health.ollama_model_installed
+                      ? 'green'
+                      : health.ollama_available
+                      ? 'amber'
+                      : 'red'
+                  }`} />
+                  AI: {
+                    health.ollama_available && health.ollama_model_installed
+                      ? `Ollama (${health.target_ai_model || 'qwen3:4b'})`
+                      : health.ollama_available
+                      ? `Ollama online (${health.target_ai_model || 'qwen3:4b'} not installed)`
+                      : 'Ollama offline (Evidence fallback)'
+                  }
                 </div>
               </>
             )}
