@@ -28,6 +28,7 @@ RepoReady analyzes any public GitHub repository using real GitHub REST API data 
 | Data | GitHub REST API v3 via httpx (async) |
 | Testing | pytest |
 | AI (optional) | Ollama (local LLM inference) |
+| Qwen3 | open-weight large language models (LLMs) |
 
 ---
 
