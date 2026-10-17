@@ -68,33 +68,23 @@ async def lifespan(app: FastAPI):
     print("[*] RepoReady backend shutting down")
 
 
+
 app = FastAPI(
     title="RepoReady",
     description="Evidence-based onboarding guide generator for public GitHub repositories",
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# CORS: allow the deployed Vercel frontend and local development.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://repoready-eight.vercel.app",
         "http://localhost:5173",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Local frontend CORS configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
